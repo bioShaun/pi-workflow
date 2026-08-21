@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pi-workflow UI/UX 优化交互原型 (Prototype)</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --border-focus: #58a6ff;
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+      --text-bright: #f0f6fc;
+      --accent: #58a6ff;
+      --accent-green: #3fb950;
+      --accent-yellow: #d29922;
+      --accent-red: #f85149;
+      --accent-purple: #bc8cff;
+      --accent-cyan: #39c5cf;
+      --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+      padding: 24px;
+      padding-bottom: 100px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    /* Top Question Banner */
+    .prototype-header {
+      background: linear-gradient(135deg, rgba(88, 166, 255, 0.1), rgba(188, 140, 255, 0.08));
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-bottom: 24px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 20px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .badge-proto {
+      background: rgba(210, 153, 34, 0.2);
+      color: var(--accent-yellow);
+      border: 1px solid rgba(210, 153, 34, 0.4);
+    }
+    .badge-tag {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent);
+      margin-left: 8px;
+    }
+
+    .prototype-header h1 {
+      font-size: 22px;
+      color: var(--text-bright);
+      margin: 12px 0 6px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .prototype-header p {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    /* Scenario & Simulation Control Toolbar */
+    .toolbar {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin-bottom: 24px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      background: #21262d;
+      color: var(--text-bright);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+    .btn:hover {
+      background: #30363d;
+      border-color: #8b949e;
+    }
+    .btn:active {
+      transform: scale(0.98);
+    }
+    .btn-primary {
+      background: #238636;
+      border-color: rgba(240, 246, 252, 0.1);
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: #2ea043;
+    }
+    .btn-warning {
+      background: rgba(210, 153, 34, 0.2);
+      border-color: rgba(210, 153, 34, 0.5);
+      color: var(--accent-yellow);
+    }
+    .btn-warning:hover {
+      background: rgba(210, 153, 34, 0.35);
+    }
+    .btn-outline {
+      background: transparent;
+    }
+
+    select {
+      background: #21262d;
+      color: var(--text-bright);
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      font-size: 13px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    /* Main Terminal Layout */
+    .terminal-window {
+      background: #090d13;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 580px;
+    }
+
+    .terminal-titlebar {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
+    }
+
+    .terminal-dots {
+      display: flex;
+      gap: 7px;
+    }
+    .dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+    }
+    .dot-red { background: #ff5f56; }
+    .dot-yellow { background: #ffbd2e; }
+    .dot-green { background: #27c93f; }
+
+    .terminal-title {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    .terminal-body {
+      padding: 20px;
+      flex: 1;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: #e6edf3;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Variant Layouts */
+    .variant-header {
+      background: rgba(88, 166, 255, 0.05);
+      border-left: 3px solid var(--accent);
+      padding: 8px 14px;
+      font-size: 13px;
+      color: var(--accent);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    /* Variant A: Sticky Pipeline Widget */
+    .pipeline-widget {
+      background: #12171f;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-bottom: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    .pipeline-steps {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .pipe-node {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #1c2128;
+      color: var(--text-muted);
+      border: 1px solid transparent;
+      transition: all 0.2s;
+    }
+    .pipe-node.done {
+      background: rgba(63, 185, 80, 0.15);
+      color: var(--accent-green);
+      border-color: rgba(63, 185, 80, 0.3);
+    }
+    .pipe-node.active {
+      background: rgba(88, 166, 255, 0.2);
+      color: var(--accent);
+      border-color: var(--accent);
+      box-shadow: 0 0 10px rgba(88, 166, 255, 0.3);
+      animation: pulse-border 1.5s infinite;
+    }
+    .pipe-arrow {
+      color: #484f58;
+      font-size: 12px;
+    }
+
+    .pipeline-status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: var(--text-muted);
+      border-top: 1px dashed #30363d;
+      padding-top: 10px;
+    }
+
+    .live-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-bright);
+    }
+    .spinner {
+      display: inline-block;
+      color: var(--accent-cyan);
+      font-weight: bold;
+    }
+
+    /* Milestone Cards */
+    .card-message {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      overflow: hidden;
+      animation: fadeIn 0.3s ease;
+    }
+    .card-header {
+      padding: 8px 14px;
+      font-weight: 600;
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #30363d;
+    }
+    .card-header.scout { background: rgba(57, 197, 207, 0.1); color: var(--accent-cyan); }
+    .card-header.plan { background: rgba(88, 166, 255, 0.1); color: var(--accent); }
+    .card-header.worker { background: rgba(210, 153, 34, 0.1); color: var(--accent-yellow); }
+    .card-header.review { background: rgba(188, 140, 255, 0.1); color: var(--accent-purple); }
+    .card-header.success { background: rgba(63, 185, 80, 0.1); color: var(--accent-green); }
+
+    .card-content {
+      padding: 12px 16px;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    /* Collapsible Tool Log (Claude Code Style) */
+    .trace-item {
+      background: #11151c;
+      border: 1px solid #282e36;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #adbac7;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .trace-item:hover {
+      background: #191f28;
+    }
+    .trace-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Subagent Drawer / Inspector Panel */
+    .inspector-drawer {
+      background: #121820;
+      border-top: 2px solid var(--accent);
+      padding: 14px 18px;
+      margin-top: 10px;
+      border-radius: 8px;
+    }
+    .inspector-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+    .inspector-logs {
+      background: #090c10;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 11px;
+      color: #8b949e;
+      max-height: 120px;
+      overflow-y: auto;
+      line-height: 1.5;
+    }
+    .log-line { margin-bottom: 2px; }
+    .log-line.tool { color: var(--accent-cyan); }
+    .log-line.thought { color: #768390; font-style: italic; }
+    .log-line.output { color: #adbac7; }
+
+    /* Footer Status Line */
+    .terminal-footer {
+      background: #161b22;
+      border-top: 1px solid #30363d;
+      padding: 8px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .footer-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .footer-highlight {
+      color: var(--text-bright);
+      font-weight: 500;
+    }
+
+    /* Floating Switcher Bar */
+    .floating-switcher {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #21262d;
+      border: 1px solid #484f58;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+      border-radius: 30px;
+      padding: 6px 12px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      z-index: 1000;
+    }
+
+    .switcher-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-bright);
+      font-size: 16px;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .switcher-btn:hover {
+      background: #30363d;
+    }
+
+    .switcher-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-bright);
+      white-space: nowrap;
+    }
+    .switcher-tag {
+      background: var(--accent);
+      color: #0d1117;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 12px;
+      margin-left: 6px;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse-border {
+      0% { border-color: rgba(88, 166, 255, 0.4); }
+      50% { border-color: rgba(88, 166, 255, 1); }
+      100% { border-color: rgba(88, 166, 255, 0.4); }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Top Question Banner -->
+  <div class="prototype-header">
+    <div>
+      <span class="badge badge-proto">Throwaway Prototype</span>
+      <span class="badge badge-tag">pi-workflow UI/UX Evolution</span>
+      <span class="badge badge-tag">3 Variants · Interactive Simulator</span>
+    </div>
+    <h1>🎨 pi-workflow 终端用户界面交互优化原型</h1>
+    <p>
+      <strong>核心问题：</strong> 解决 <code>/work auto</code> 自动化工作流执行时中间大段黑盒空白、只有底部 Token 增长的问题。通过 3 种不同风格的原型方案，演示实时进度看板、动态微状态、阶段里程碑卡片与 Inspector 抽屉联动。
+    </p>
+  </div>
+
+  <!-- Scenario & Control Toolbar -->
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <span style="font-size: 13px; font-weight: 600; color: var(--text-muted);">模拟场景:</span>
+      <select id="scenarioSelect" onchange="loadScenario(this.value)">
+        <option value="happy">1. 标准自动化工作流 (Happy Path · 1次通过)</option>
+        <option value="review_fix">2. 审查返工循环 (Review Reject ➔ Fix Worker ➔ Pass)</option>
+        <option value="step_by_step">3. 分步执行模式 (/work plan ➔ /work implement)</option>
+        <option value="gate_fail">4. 门禁拦截场景 (Plan Gate 格式校验修复)</option>
+      </select>
+      <button class="btn btn-primary" id="playBtn" onclick="togglePlay()">
+        <span id="playIcon">▶</span> <span id="playText">开始模拟</span>
+      </button>
+      <button class="btn btn-outline" onclick="stepNext()">单步前进 ⏭</button>
+      <button class="btn btn-outline" onclick="resetWorkflow()">重置 ↺</button>
+    </div>
+
+    <div class="toolbar-group">
+      <span style="font-size: 13px; color: var(--text-muted);">运行速度:</span>
+      <select id="speedSelect" onchange="setSpeed(this.value)">
+        <option value="1">1x 拟真速度</option>
+        <option value="2" selected>2x 加速</option>
+        <option value="5">5x 极速</option>
+      </select>
+      <button class="btn btn-warning" onclick="toggleDrawerManual()">
+        抽屉 Inspector (<span style="font-family: var(--font-mono);">↓/←</span>)
+      </button>
+    </div>
+  </div>
+
+  <!-- Terminal Window Viewport -->
+  <div class="terminal-window">
+    <div class="terminal-titlebar">
+      <div class="terminal-dots">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+      </div>
+      <div class="terminal-title">pi · pi-workflow v0.1 · session-20260821</div>
+      <div style="font-size: 11px; color: #6e7681;" id="variantNameIndicator">Variant A: Sticky Pipeline Widget</div>
+    </div>
+
+    <div class="terminal-body" id="terminalBody">
+      <!-- Variant view content rendered by JS -->
+    </div>
+
+    <!-- Terminal Footer Status Line -->
+    <div class="terminal-footer">
+      <div class="footer-left">
+        <span id="agentCountStatus">1 active agent</span>
+        <span>·</span>
+        <span id="asyncRunsStatus">Async runs 0/∞</span>
+        <span>·</span>
+        <span class="footer-highlight" id="tokenUsageStatus">↓ 0.0k tokens</span>
+        <span>·</span>
+        <span id="elapsedStatus">⏱ 00:00</span>
+      </div>
+      <div>
+        <span style="color: #58a6ff; font-size: 11px;">按 <strong>↓</strong> 或 <strong>←</strong> 打开 Subagent Inspector</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Floating Switcher Bar -->
+<div class="floating-switcher">
+  <button class="switcher-btn" onclick="prevVariant()" title="上一个方案 (←)">◀</button>
+  <div class="switcher-label">
+    <span id="curVariantKey">Variant A</span>
+    <span class="switcher-tag" id="curVariantTag">顶部看板式</span>
+  </div>
+  <button class="switcher-btn" onclick="nextVariant()" title="下一个方案 (→)">▶</button>
+</div>
+
+<script>
+  // --- Prototype Logic & State Model ---
+
+  const VARIANTS = [
+    {
+      id: "A",
+      name: "Sticky Pipeline Widget",
+      tag: "顶部看板式 (推荐)",
+      desc: "在输入框上方挂载粘顶状态看板，显示节点管道图与当前动作，主聊天流沉淀阶段卡片"
+    },
+    {
+      id: "B",
+      name: "Claude Code Stream-First",
+      tag: "紧凑流式日志",
+      desc: "聊天流中就地展开紧凑执行树、折叠工具痕迹与耗时，适合追求极简折叠的用户"
+    },
+    {
+      id: "C",
+      name: "Split Inspector Drawer",
+      tag: "分屏抽屉模式",
+      desc: "主界面保持高层次决策卡片，底部独立展开 Subagent 内部思考与 Shell 执行抽屉"
+    }
+  ];
+
+  let currentVariantIndex = 0;
+  let currentStepIndex = 0;
+  let isPlaying = false;
+  let playTimer = null;
+  let speedMultiplier = 2;
+  let elapsedSeconds = 0;
+  let timerInterval = null;
+  let isDrawerOpen = false;
+
+  // Pre-recorded workflow trace events for simulation
+  const SCENARIOS = {
+    happy: [
+      {
+        node: "scout",
+        state: "scouting",
+        agent: "scout",
+        tool: "find_by_name",
+        toolArgs: "Pattern: 'src/**/*.ts'",
+        actionText: "Scout 正在探索项目架构与规范...",
+        tokens: 18400,
+        thought: "正在读取 docs/pi-workflow.spec.md 并定位核心入口文件...",
+        log: "Found 60 TypeScript source files.",
+        duration: 3
+      },
+      {
+        node: "plan",
+        state: "planning",
+        agent: "planner",
+        tool: "read_file",
+        toolArgs: "docs/pi-workflow.spec.md (L1-120)",
+        actionText: "Planner 正在分析规范并生成结构化方案...",
+        tokens: 65200,
+        thought: "需要实现 Plan Gate、Test Gate 以及新鲜 Reviewer 上下文机制...",
+        log: "Generated PlanResult with 4 steps, 3 files to modify.",
+        card: {
+          type: "plan",
+          title: "📋 [Plan Approved] 结构化计划生成完毕",
+          summary: "针对 `docs/pi-workflow.spec.md` 审核开发结果，计划执行 4 个步骤，涉及 3 个核心文件。",
+          details: [
+            "1. 审查状态机与门禁逻辑 (src/engine/state-machine.ts)",
+            "2. 检查 Reviewer fresh context 隔离性 (src/agents/executor.ts)",
+            "3. 运行完整自动化测试套件 (npm test)"
+          ]
+        },
+        duration: 4
+      },
+      {
+        node: "implement",
+        state: "implementing",
+        agent: "worker",
+        tool: "edit_file",
+        toolArgs: "src/engine/transitions.ts (+24 -4 lines)",
+        actionText: "Worker 正在执行代码修改与测试编写...",
+        tokens: 142000,
+        thought: "正在补齐 ReviewGate 校验条件并修复潜在的状态死锁...",
+        log: "Applied patch to transitions.ts · Executing npm test: 7/7 tests passed.",
+        card: {
+          type: "worker",
+          title: "🛠️ [Implementation Completed] 代码实施完毕",
+          summary: "Worker 已完成代码实现并触发本地测试门禁。",
+          details: [
+            "✓ 修改文件: src/engine/transitions.ts (+24 -4)",
+            "✓ 测试门禁: 7/7 passed (1.2s)",
+            "✓ 准备进入第一轮新鲜 Reviewer 独立审查"
+          ]
+        },
+        duration: 5
+      },
+      {
+        node: "review-1",
+        state: "reviewing",
+        agent: "reviewer",
+        tool: "read_file",
+        toolArgs: "git diff HEAD~1",
+        actionText: "Reviewer #1 (Fresh Context) 独立审查中...",
+        tokens: 210000,
+        thought: "以全新上下文验证改动，不继承 Worker 辩解历史，检查规范一致性...",
+        log: "Reviewer verdict: PASS. All quality gates satisfied.",
+        card: {
+          type: "review",
+          title: "🔍 [Review Verdict: PASS] 审查通过",
+          summary: "Reviewer #1 审查结论：PASS (0 findings, 1 round)。",
+          details: [
+            "✓ 满足 Core Invariant (Reviewer Fresh Context)",
+            "✓ 状态跃迁符合规范无越权",
+            "✓ 达成 Completion Gate 条件"
+          ]
+        },
+        duration: 4
+      },
+      {
+        node: "completed",
+        state: "completed",
+        agent: null,
+        tool: null,
+        actionText: "工作流顺利完成！",
+        tokens: 240100,
+        card: {
+          type: "success",
+          title: "🎉 [Workflow Completed] 工作流自动化执行成功",
+          summary: "全自动流水线完成，已沉淀最终归档产物 final.json。",
+          details: [
+            "• 耗时: 48s · 消耗 Tokens: 240.1k",
+            "• 审查轮次: 1/3 (一次性通过)",
+            "• 本地仓库变更已安全就绪，未执行非授权 git commit"
+          ]
+        },
+        duration: 1
+      }
+    ],
+    review_fix: [
+      {
+        node: "scout",
+        state: "scouting",
+        agent: "scout",
+        actionText: "Scout 正在扫描仓库...",
+        tokens: 15000,
+        thought: "定位仓库规范...",
+        duration: 2
+      },
+      {
+        node: "plan",
+        state: "planning",
+        agent: "planner",
+        actionText: "Planner 正在制定实施计划...",
+        tokens: 58000,
+        card: {
+          type: "plan",
+          title: "📋 [Plan Approved] 计划已批准 (Mode: strict)",
+          summary: "Strict 模式下将启动双审机制 (Reviewer A & B)。",
+          details: ["Step 1: 完善门禁", "Step 2: 修复边界"]
+        },
+        duration: 3
+      },
+      {
+        node: "implement",
+        state: "implementing",
+        agent: "worker",
+        actionText: "Worker 正在实施代码...",
+        tokens: 120000,
+        duration: 4
+      },
+      {
+        node: "review-1",
+        state: "reviewing",
+        agent: "reviewer",
+        actionText: "Reviewer #1 (Fresh Context) 审查中...",
+        tokens: 180000,
+        thought: "发现一个潜在的 null pointer 隐患...",
+        card: {
+          type: "review",
+          title: "⚠️ [Review Verdict: REQUEST_CHANGES] 发现缺陷",
+          summary: "Reviewer #1 驳回并提出 1 项修改意见，自动进入 Fix 环节。",
+          details: [
+            "- [HIGH] transitions.ts: 缺失对 run.plan 为空时的守卫校验",
+            "→ 启动 Fix Worker 进行针对性修复 (Round 1/3)"
+          ]
+        },
+        duration: 4
+      },
+      {
+        node: "fix-1",
+        state: "fixing",
+        agent: "worker",
+        actionText: "Fix Worker 正在修复 Reviewer 提出的缺陷...",
+        tokens: 220000,
+        thought: "注入 run.plan 守卫断言并重跑单元测试...",
+        card: {
+          type: "worker",
+          title: "🔧 [Fix Completed] 缺陷修复完成",
+          summary: "Fix Worker 已完成修复，准备发起 Reviewer #2 (Fresh Context) 再次审查。",
+          details: ["✓ 修复 transitions.ts null guard", "✓ 单元测试全部通过"]
+        },
+        duration: 3
+      },
+      {
+        node: "review-2",
+        state: "reviewing",
+        agent: "reviewer",
+        actionText: "Reviewer #2 (全新独立上下文) 复核中...",
+        tokens: 275000,
+        thought: "验证上一轮 findings 是否完全被解决...",
+        card: {
+          type: "review",
+          title: "🔍 [Review Verdict: PASS] 复核通过",
+          summary: "Reviewer #2 复核结果：PASS (Round 2)。",
+          details: ["✓ 缺陷已完全解决", "✓ 允许合并"]
+        },
+        duration: 3
+      },
+      {
+        node: "completed",
+        state: "completed",
+        actionText: "工作流修复并完成！",
+        tokens: 295000,
+        card: {
+          type: "success",
+          title: "🎉 [Workflow Completed] 工作流完成",
+          summary: "经历 1 轮自动返工修复后顺利通过审查！",
+          details: ["• 审查轮次: 2/3", "• 自动化闭环达成"]
+        },
+        duration: 1
+      }
+    ],
+    step_by_step: [
+      {
+        node: "scout",
+        state: "scouting",
+        agent: "scout",
+        actionText: "/work plan 执行中...",
+        tokens: 12000,
+        thought: "探索文件树...",
+        duration: 2
+      },
+      {
+        node: "plan",
+        state: "plan_ready",
+        agent: "planner",
+        actionText: "Plan Ready! 等待用户审阅与触发 /work implement",
+        tokens: 45000,
+        card: {
+          type: "plan",
+          title: "📋 [Plan Ready] 计划已生成",
+          summary: "执行完毕，状态跃迁至 plan_ready。运行 `/work implement` 继续。",
+          details: ["待修改: 2 files", "风险评估: LOW"]
+        },
+        duration: 2
+      }
+    ],
+    gate_fail: [
+      {
+        node: "plan",
+        state: "planning",
+        agent: "planner",
+        actionText: "Planner 首次输出结构不满足 Schema，Retry Policy 介入自动修复...",
+        tokens: 38000,
+        thought: "Plan Gate 校验失败: missing 'steps' field. 发起自动二次纠偏 prompt...",
+        card: {
+          type: "plan",
+          title: "⚠️ [Plan Gate Retry] 自动重试中",
+          summary: "格式不满足门禁约束，RetryPolicy 自动触发第二轮结构化修正。",
+          details: ["Attempt: 1/2", "Error: 'steps' array is required"]
+        },
+        duration: 3
+      },
+      {
+        node: "plan",
+        state: "plan_ready",
+        agent: "planner",
+        actionText: "第二轮重试通过 Plan Gate 校验！",
+        tokens: 72000,
+        card: {
+          type: "plan",
+          title: "✓ [Plan Gate Passed] 计划纠偏成功",
+          summary: "重试后成功产出合规计划。",
+          details: ["Gate Status: PASS"]
+        },
+        duration: 2
+      }
+    ]
+  };
+
+  let currentScenarioKey = "happy";
+  let activeScenario = SCENARIOS.happy;
+
+  function loadScenario(key) {
+    currentScenarioKey = key;
+    activeScenario = SCENARIOS[key] || SCENARIOS.happy;
+    resetWorkflow();
+  }
+
+  function resetWorkflow() {
+    pause();
+    currentStepIndex = 0;
+    elapsedSeconds = 0;
+    clearInterval(timerInterval);
+    timerInterval = null;
+    updateTimerDisplay();
+    render();
+  }
+
+  function togglePlay() {
+    if (isPlaying) {
+      pause();
+    } else {
+      play();
+    }
+  }
+
+  function play() {
+    isPlaying = true;
+    document.getElementById("playIcon").innerText = "⏸";
+    document.getElementById("playText").innerText = "暂停";
+    
+    if (!timerInterval) {
+      timerInterval = setInterval(() => {
+        elapsedSeconds++;
+        updateTimerDisplay();
+      }, 1000 / speedMultiplier);
+    }
+
+    runNextAutoStep();
+  }
+
+  function pause() {
+    isPlaying = false;
+    document.getElementById("playIcon").innerText = "▶";
+    document.getElementById("playText").innerText = "开始模拟";
+    if (playTimer) clearTimeout(playTimer);
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+
+  function runNextAutoStep() {
+    if (!isPlaying) return;
+    if (currentStepIndex >= activeScenario.length - 1) {
+      pause();
+      return;
+    }
+
+    const step = activeScenario[currentStepIndex];
+    const delay = ((step.duration || 3) * 1000) / speedMultiplier;
+
+    playTimer = setTimeout(() => {
+      if (!isPlaying) return;
+      currentStepIndex++;
+      render();
+      if (currentStepIndex < activeScenario.length - 1) {
+        runNextAutoStep();
+      } else {
+        pause();
+      }
+    }, delay);
+  }
+
+  function stepNext() {
+    pause();
+    if (currentStepIndex < activeScenario.length - 1) {
+      currentStepIndex++;
+      elapsedSeconds += 4;
+      updateTimerDisplay();
+      render();
+    }
+  }
+
+  function setSpeed(val) {
+    speedMultiplier = parseInt(val, 10);
+    if (isPlaying) {
+      clearInterval(timerInterval);
+      timerInterval = setInterval(() => {
+        elapsedSeconds++;
+        updateTimerDisplay();
+      }, 1000 / speedMultiplier);
+    }
+  }
+
+  function updateTimerDisplay() {
+    const mins = String(Math.floor(elapsedSeconds / 60)).padStart(2, '0');
+    const secs = String(elapsedSeconds % 60).padStart(2, '0');
+    document.getElementById("elapsedStatus").innerText = `⏱ ${mins}:${secs}`;
+  }
+
+  function toggleDrawerManual() {
+    isDrawerOpen = !isDrawerOpen;
+    render();
+  }
+
+  // Keyboard navigation for variants & drawer
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") {
+      prevVariant();
+    } else if (e.key === "ArrowRight") {
+      nextVariant();
+    } else if (e.key === "ArrowDown") {
+      toggleDrawerManual();
+    }
+  });
+
+  function prevVariant() {
+    currentVariantIndex = (currentVariantIndex - 1 + VARIANTS.length) % VARIANTS.length;
+    updateVariantBar();
+    render();
+  }
+
+  function nextVariant() {
+    currentVariantIndex = (currentVariantIndex + 1) % VARIANTS.length;
+    updateVariantBar();
+    render();
+  }
+
+  function updateVariantBar() {
+    const cur = VARIANTS[currentVariantIndex];
+    document.getElementById("curVariantKey").innerText = `Variant ${cur.id}`;
+    document.getElementById("curVariantTag").innerText = cur.tag;
+    document.getElementById("variantNameIndicator").innerText = `Variant ${cur.id}: ${cur.name}`;
+  }
+
+  // --- Render Function ---
+  function render() {
+    const body = document.getElementById("terminalBody");
+    const curVariant = VARIANTS[currentVariantIndex];
+    const currentStep = activeScenario[currentStepIndex];
+
+    // Update bottom footer status line
+    document.getElementById("tokenUsageStatus").innerText = `↓ ${(currentStep.tokens / 1000).toFixed(1)}k tokens`;
+    document.getElementById("agentCountStatus").innerText = currentStep.agent ? `1 active agent (${currentStep.agent})` : "0 active agents";
+
+    let html = "";
+
+    // Header command display
+    html += `
+      <div style="color: #8b949e; margin-bottom: 4px;">
+        <span style="color: var(--accent-green);">tcuni-claw@pi</span>:<span style="color: var(--accent);">~/pi/pi-workflow</span>$ /work auto "审核 docs/pi-workflow.spec.md 的开发结果"
+      </div>
+    `;
+
+    if (curVariant.id === "A") {
+      // --- VARIANT A: Sticky Pipeline Widget ---
+      html += renderVariantA(currentStep);
+    } else if (curVariant.id === "B") {
+      // --- VARIANT B: Claude Code Stream-First ---
+      html += renderVariantB(currentStep);
+    } else if (curVariant.id === "C") {
+      // --- VARIANT C: Split Inspector Drawer ---
+      html += renderVariantC(currentStep);
+    }
+
+    body.innerHTML = html;
+    body.scrollTop = body.scrollHeight;
+  }
+
+  function getStepClass(nodeName, currentNode) {
+    const order = ["scout", "plan", "implement", "review-1", "fix-1", "review-2", "completed"];
+    const curIdx = order.indexOf(currentNode);
+    const thisIdx = order.indexOf(nodeName);
+
+    if (thisIdx < curIdx || currentNode === "completed") return "done";
+    if (thisIdx === curIdx) return "active";
+    return "";
+  }
+
+  function renderVariantA(step) {
+    const currentNode = step.node;
+    let out = `
+      <div class="variant-header">
+        <span><strong>Variant A:</strong> Sticky Top Pipeline Widget (常驻顶部看板)</span>
+        <span>Pi Extension API: <code>ctx.ui.setWidget</code></span>
+      </div>
+
+      <!-- Sticky Pipeline Widget -->
+      <div class="pipeline-widget">
+        <div class="pipeline-steps">
+          <div class="pipe-node ${getStepClass('scout', currentNode)}">
+            <span>${getStepClass('scout', currentNode) === 'done' ? '✓' : '1'}</span> Scout
+          </div>
+          <span class="pipe-arrow">➔</span>
+          <div class="pipe-node ${getStepClass('plan', currentNode)}">
+            <span>${getStepClass('plan', currentNode) === 'done' ? '✓' : '2'}</span> Plan
+          </div>
+          <span class="pipe-arrow">➔</span>
+          <div class="pipe-node ${getStepClass('implement', currentNode)}">
+            <span>${getStepClass('implement', currentNode) === 'done' ? '✓' : '3'}</span> Implement
+          </div>
+          <span class="pipe-arrow">➔</span>
+          <div class="pipe-node ${getStepClass('review-1', currentNode)}">
+            <span>${getStepClass('review-1', currentNode) === 'done' ? '✓' : '4'}</span> Review
+          </div>
+          ${activeScenario.some(s => s.node === 'fix-1') ? `
+            <span class="pipe-arrow">➔</span>
+            <div class="pipe-node ${getStepClass('fix-1', currentNode)}">
+              <span>${getStepClass('fix-1', currentNode) === 'done' ? '✓' : '5'}</span> Fix
+            </div>
+          ` : ''}
+          <span class="pipe-arrow">➔</span>
+          <div class="pipe-node ${currentNode === 'completed' ? 'done' : ''}">
+            <span>${currentNode === 'completed' ? '✓' : '🏁'}</span> Done
+          </div>
+        </div>
+
+        <div class="pipeline-status-row">
+          <div class="live-indicator">
+            <span class="spinner">${step.state === 'completed' ? '●' : '⠋'}</span>
+            <span><strong>${step.agent ? `[${step.agent.toUpperCase()}]` : '[SYSTEM]'}</strong> ${step.actionText}</span>
+          </div>
+          <div>
+            ${step.tool ? `<span style="color: var(--accent-cyan);">Tool: ${step.tool}</span> · ` : ''}
+            <span>${(step.tokens / 1000).toFixed(1)}k tokens</span>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Render milestone cards accumulated so far
+    for (let i = 0; i <= currentStepIndex; i++) {
+      const s = activeScenario[i];
+      if (s.card) {
+        out += renderCardHtml(s.card);
+      }
+    }
+
+    if (isDrawerOpen) {
+      out += renderInspectorDrawer(step);
+    }
+
+    return out;
+  }
+
+  function renderVariantB(step) {
+    let out = `
+      <div class="variant-header">
+        <span><strong>Variant B:</strong> Claude Code Style Stream & Traces (紧凑流式折叠)</span>
+        <span>特性：即时面包屑动作行 + 折叠工具追踪 + 差异行数徽章</span>
+      </div>
+    `;
+
+    for (let i = 0; i <= currentStepIndex; i++) {
+      const s = activeScenario[i];
+      const isCurrent = i === currentStepIndex;
+
+      out += `
+        <div style="margin-bottom: 8px;">
+          <div class="trace-item">
+            <div class="trace-left">
+              <span style="color: ${isCurrent && s.state !== 'completed' ? 'var(--accent-cyan)' : 'var(--accent-green)'};">
+                ${isCurrent && s.state !== 'completed' ? '⠋' : '✓'}
+              </span>
+              <span><strong>${s.agent ? `[${s.agent}]` : '[Workflow]'}</strong> ${s.actionText}</span>
+            </div>
+            <div>
+              <span style="color: #6e7681; font-size: 11px;">${(s.tokens / 1000).toFixed(1)}k tok · ${s.duration}s</span>
+            </div>
+          </div>
+          ${s.thought ? `
+            <div style="padding-left: 24px; padding-top: 4px; font-size: 11px; color: #6e7681; font-style: italic;">
+              ↳ 思考: ${s.thought}
+            </div>
+          ` : ''}
+        </div>
+      `;
+
+      if (s.card) {
+        out += renderCardHtml(s.card);
+      }
+    }
+
+    if (isDrawerOpen) {
+      out += renderInspectorDrawer(step);
+    }
+
+    return out;
+  }
+
+  function renderVariantC(step) {
+    let out = `
+      <div class="variant-header">
+        <span><strong>Variant C:</strong> Split Inspector Drawer (分屏抽屉模式)</span>
+        <span>主视图保持高阶决策概览，底部常驻展开 Subagent 内部 Log 与 Shell 追踪</span>
+      </div>
+    `;
+
+    // Cards in main stream
+    for (let i = 0; i <= currentStepIndex; i++) {
+      const s = activeScenario[i];
+      if (s.card) {
+        out += renderCardHtml(s.card);
+      }
+    }
+
+    // Always-expanded or toggleable Inspector Drawer in Variant C
+    out += renderInspectorDrawer(step, true);
+
+    return out;
+  }
+
+  function renderCardHtml(card) {
+    return `
+      <div class="card-message">
+        <div class="card-header ${card.type}">
+          <span>${card.title}</span>
+          <span style="font-size: 11px; opacity: 0.8;">Checkpoint Artifact</span>
+        </div>
+        <div class="card-content">
+          <div style="margin-bottom: 8px; color: #f0f6fc;">${card.summary}</div>
+          <ul style="list-style: none; padding-left: 0; color: #8b949e; font-size: 11px;">
+            ${card.details.map(d => `<li style="margin-bottom: 3px;">${d}</li>`).join('')}
+          </ul>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderInspectorDrawer(step, forceOpen = false) {
+    return `
+      <div class="inspector-drawer">
+        <div class="inspector-header">
+          <span>🔍 Subagent Inspector (${step.agent ? step.agent : 'idle'}) · Live Activity Feed</span>
+          <span style="color: #8b949e; font-size: 11px;">(按 ↓/← 键随时可折叠/展开)</span>
+        </div>
+        <div class="inspector-logs">
+          <div class="log-line tool">> Node: ${step.node} | Context: fresh | Timeout: 120s</div>
+          ${step.thought ? `<div class="log-line thought">> [Thinking] ${step.thought}</div>` : ''}
+          ${step.tool ? `<div class="log-line tool">> [Tool Call] ${step.tool} (${step.toolArgs || ''})</div>` : ''}
+          ${step.log ? `<div class="log-line output">> [Stdout] ${step.log}</div>` : ''}
+          <div class="log-line" style="color: #484f58;">> Current token velocity: +4.2k tok/s · RAM: 42MB</div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Initial render
+  updateVariantBar();
+  render();
+</script>
+
+</body>
+</html>

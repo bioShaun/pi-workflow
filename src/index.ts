@@ -1,0 +1,12 @@
+export { default } from "./extension.ts";
+export * from "./contracts/workflow.ts";
+export * from "./contracts/plan.ts";
+export * from "./contracts/implementation.ts";
+export * from "./contracts/review.ts";
+export * from "./contracts/fix.ts";
+export * from "./contracts/scout.ts";
+export * from "./engine/engine.ts";
+export * from "./engine/state-machine.ts";
+export * from "./engine/errors.ts";
+export * from "./agents/executor.ts";
+export * from "./agents/preflight.ts";
