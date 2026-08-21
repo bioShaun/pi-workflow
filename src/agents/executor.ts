@@ -11,6 +11,21 @@ export interface AgentExecutionUsage {
   toolCalls?: number;
 }
 
+export interface AgentProgressUpdate {
+  runId?: string;
+  nodeId: string;
+  agent: string;
+  currentTool?: string;
+  currentToolArgs?: string;
+  recentOutput?: string;
+  recentOutputLines?: string[];
+  recentTools?: Array<{ tool: string; args: string }>;
+  model?: string;
+  toolCount?: number;
+  durationMs?: number;
+  tokens?: number;
+}
+
 export interface AgentExecutionRequest<T = unknown> {
   workflowRunId: string;
   nodeId: string;
@@ -22,6 +37,7 @@ export interface AgentExecutionRequest<T = unknown> {
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   timeoutMs?: number;
   model?: string;
+  onUpdate?: (update: AgentProgressUpdate) => void;
 }
 
 export interface AgentExecutionResult<T = unknown> {
@@ -51,6 +67,7 @@ export function createReviewerExecutionRequest<T>(params: {
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   timeoutMs?: number;
   model?: string;
+  onUpdate?: (update: AgentProgressUpdate) => void;
 }): AgentExecutionRequest<T> {
   const req: AgentExecutionRequest<T> = {
     workflowRunId: params.workflowRunId,
@@ -63,6 +80,7 @@ export function createReviewerExecutionRequest<T>(params: {
     thinking: params.thinking,
     timeoutMs: params.timeoutMs,
     model: params.model,
+    onUpdate: params.onUpdate,
   };
 
   assertReviewerFreshness({ role: "reviewer", context: req.context });

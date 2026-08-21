@@ -156,3 +156,47 @@ export function renderRunError(run: WorkflowRun): string {
   const nodeId = run.error?.nodeId ? ` (node: ${run.error.nodeId})` : "";
   return `Workflow failed [${code}]${nodeId}: ${message}\nRun: ${run.id}\nUse /work status for details, /work abort to release the run.`;
 }
+
+export interface TraceLineOptions {
+  status?: "success" | "warning" | "error" | "running";
+  agent: string;
+  action: string;
+  durationMs?: number;
+  tokens?: number;
+  details?: string[];
+}
+
+/** Render a compact single-line trace item (Claude Code style) */
+export function renderTraceLine(opts: TraceLineOptions): string {
+  const icon =
+    opts.status === "warning"
+      ? "⚠️"
+      : opts.status === "error"
+      ? "✗"
+      : opts.status === "running"
+      ? "⠋"
+      : "✓";
+
+  const durStr = opts.durationMs != null ? ` · ${(opts.durationMs / 1000).toFixed(1)}s` : "";
+  const tokStr = opts.tokens != null && opts.tokens > 0 ? ` · ${(opts.tokens / 1000).toFixed(1)}k tok` : "";
+
+  const mainLine = `${icon} [${opts.agent}] ${opts.action}${durStr}${tokStr}`;
+  if (opts.details && opts.details.length > 0) {
+    return [mainLine, ...opts.details.map((d) => `  ↳ ${d}`)].join("\n");
+  }
+  return mainLine;
+}
+
+/** Format a dynamic working message breadcrumb shown during streaming */
+export function formatWorkingBreadcrumb(
+  agent: string,
+  action: string,
+  currentTool?: string,
+  durationMs?: number,
+  tokens?: number
+): string {
+  const toolStr = currentTool ? ` · ${currentTool}` : "";
+  const durStr = durationMs != null ? ` · ${(durationMs / 1000).toFixed(1)}s` : "";
+  const tokStr = tokens != null && tokens > 0 ? ` · ${(tokens / 1000).toFixed(1)}k tok` : "";
+  return `[${agent}] ${action}${toolStr}${durStr}${tokStr}`;
+}

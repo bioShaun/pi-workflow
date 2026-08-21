@@ -84,6 +84,19 @@ export function generateWorkflowRunId(): string {
   return `wf_${y}${m}${d}_${hh}${mm}${ss}_${rand}`;
 }
 
+export interface WorkflowProgressEvent {
+  type: "node_start" | "node_update" | "node_end";
+  run: WorkflowRun;
+  nodeId: string;
+  agent?: string;
+  action?: string;
+  durationMs?: number;
+  tokens?: number;
+  details?: Record<string, unknown>;
+}
+
+export type WorkflowProgressCallback = (event: WorkflowProgressEvent) => void;
+
 export interface WorkflowEngineOptions {
   cwd: string;
   executor: AgentExecutor;
@@ -94,6 +107,8 @@ export interface WorkflowEngineOptions {
   /** Injectable preflight (post-remediation review M1); tests use it to
    *  simulate preflight failures. Receives the mode being preflighted. */
   preflightForMode?: (mode: WorkflowMode) => Promise<AgentRoles>;
+  /** Optional progress callback for real-time UI/UX feedback (Claude Code style streaming) */
+  onProgress?: WorkflowProgressCallback;
 }
 
 export class WorkflowEngine {
@@ -104,6 +119,7 @@ export class WorkflowEngine {
   public readonly stateMachine: StateMachine;
   public readonly retryPolicy: RetryPolicy;
   public readonly sleep: (ms: number) => Promise<void>;
+  public readonly onProgress?: WorkflowProgressCallback;
   private readonly preflightOverride?: (mode: WorkflowMode) => Promise<AgentRoles>;
 
   constructor(options: WorkflowEngineOptions) {
@@ -122,6 +138,7 @@ export class WorkflowEngine {
     this.retryPolicy = options.retryPolicy ?? new RetryPolicy();
     this.sleep = options.sleep ?? defaultSleep;
     this.preflightOverride = options.preflightForMode;
+    this.onProgress = options.onProgress;
   }
 
   // --- Active Run & Lock Management ---
@@ -396,6 +413,17 @@ export class WorkflowEngine {
       node: "scout",
     });
 
+    const startTime = Date.now();
+    let lastTokens: number | undefined;
+
+    this.onProgress?.({
+      type: "node_start",
+      run,
+      nodeId: "scout",
+      agent: agents.scout,
+      action: "Exploring repository structure...",
+    });
+
     const taskPrompt = buildScoutPrompt({ task: run.request });
     let scoutData: ScoutResult | undefined;
     let attempt = 1;
@@ -410,9 +438,25 @@ export class WorkflowEngine {
         context: "fresh",
         cwd: this.cwd,
         schema: SCOUT_RESULT_SCHEMA,
+        onUpdate: (up) => {
+          if (up.tokens) lastTokens = up.tokens;
+          this.onProgress?.({
+            type: "node_update",
+            run,
+            nodeId: "scout",
+            agent: agents.scout,
+            action: "Exploring repository structure...",
+            durationMs: up.durationMs ?? (Date.now() - startTime),
+            tokens: up.tokens,
+            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+          });
+        },
       });
 
       if (result.status === "completed" && result.result) {
+        if (result.usage?.input) {
+          lastTokens = (result.usage.input || 0) + (result.usage.output || 0);
+        }
         const validation = validateScoutResult(result.result);
         if (validation.ok) {
           scoutData = validation.data;
@@ -463,6 +507,17 @@ export class WorkflowEngine {
       node: "scout",
     });
 
+    this.onProgress?.({
+      type: "node_end",
+      run,
+      nodeId: "scout",
+      agent: agents.scout,
+      action: `Scouted repository (${scoutData.relevantFiles.length} key file(s) identified)`,
+      durationMs: Date.now() - startTime,
+      tokens: lastTokens,
+      details: { relevantFiles: scoutData.relevantFiles },
+    });
+
     return { run, scoutResult: scoutData };
   }
 
@@ -483,6 +538,17 @@ export class WorkflowEngine {
       node: "plan",
     });
 
+    const startTime = Date.now();
+    let lastTokens: number | undefined;
+
+    this.onProgress?.({
+      type: "node_start",
+      run,
+      nodeId: "plan",
+      agent: agents.planner,
+      action: "Formulating implementation plan...",
+    });
+
     const taskPrompt = buildPlannerPrompt({ task: run.request, scout });
     let planData: PlanResult | undefined;
     let attempt = 1;
@@ -500,9 +566,25 @@ export class WorkflowEngine {
         context,
         cwd: this.cwd,
         schema: PLAN_RESULT_SCHEMA,
+        onUpdate: (up) => {
+          if (up.tokens) lastTokens = up.tokens;
+          this.onProgress?.({
+            type: "node_update",
+            run,
+            nodeId: "plan",
+            agent: agents.planner,
+            action: "Formulating implementation plan...",
+            durationMs: up.durationMs ?? (Date.now() - startTime),
+            tokens: up.tokens,
+            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+          });
+        },
       });
 
       if (execResult.status === "completed" && execResult.result) {
+        if (execResult.usage?.input) {
+          lastTokens = (execResult.usage.input || 0) + (execResult.usage.output || 0);
+        }
         const gate = evaluatePlanGate(execResult.result);
         if (gate.pass && gate.plan) {
           planData = gate.plan;
@@ -582,6 +664,17 @@ export class WorkflowEngine {
       node: "plan",
     });
 
+    this.onProgress?.({
+      type: "node_end",
+      run,
+      nodeId: "plan",
+      agent: agents.planner,
+      action: `Plan approved (${planData.steps.length} step(s), ${planData.complexity} complexity)`,
+      durationMs: Date.now() - startTime,
+      tokens: lastTokens,
+      details: { steps: planData.steps.length, files: planData.files.length, complexity: planData.complexity },
+    });
+
     return run;
   }
 
@@ -602,6 +695,17 @@ export class WorkflowEngine {
       node: "implement",
     });
 
+    const startTime = Date.now();
+    let lastTokens: number | undefined;
+
+    this.onProgress?.({
+      type: "node_start",
+      run,
+      nodeId: "implement",
+      agent: agents.worker,
+      action: "Executing implementation changes...",
+    });
+
     const scout = await this.loadScoutArtifact(run.id);
     const taskPrompt = buildWorkerPrompt({ task: run.request, plan: approvedPlan, scout });
     let implData: ImplementationResult | undefined;
@@ -617,9 +721,25 @@ export class WorkflowEngine {
         context: "fresh",
         cwd: this.cwd,
         schema: IMPLEMENTATION_RESULT_SCHEMA,
+        onUpdate: (up) => {
+          if (up.tokens) lastTokens = up.tokens;
+          this.onProgress?.({
+            type: "node_update",
+            run,
+            nodeId: "implement",
+            agent: agents.worker,
+            action: "Executing implementation changes...",
+            durationMs: up.durationMs ?? (Date.now() - startTime),
+            tokens: up.tokens,
+            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+          });
+        },
       });
 
       if (execResult.status === "completed" && execResult.result) {
+        if (execResult.usage?.input) {
+          lastTokens = (execResult.usage.input || 0) + (execResult.usage.output || 0);
+        }
         const validation = validateImplementationResult(execResult.result);
         if (validation.ok) {
           implData = validation.data;
@@ -702,6 +822,25 @@ export class WorkflowEngine {
       node: "implement",
     });
 
+    const passedTests = implData.tests.filter((t) => t.status === "passed").length;
+    const totalTests = implData.tests.length;
+
+    this.onProgress?.({
+      type: "node_end",
+      run,
+      nodeId: "implement",
+      agent: agents.worker,
+      action: `Implementation completed (${implData.changedFiles.length} file(s) changed, ${passedTests}/${totalTests} tests passed)`,
+      durationMs: Date.now() - startTime,
+      tokens: lastTokens,
+      details: {
+        changedFiles: implData.changedFiles.map((f) => f.path),
+        passedTests,
+        totalTests,
+        testGateStatus: testGate.status,
+      },
+    });
+
     return run;
   }
 
@@ -768,6 +907,17 @@ export class WorkflowEngine {
       node: nodeId,
     });
 
+    const startTime = Date.now();
+    let lastTokens: number | undefined;
+
+    this.onProgress?.({
+      type: "node_start",
+      run,
+      nodeId,
+      agent: agents.reviewer,
+      action: `Independent review in progress (${reviewerId}, fresh context)...`,
+    });
+
     let attempt = 1;
     let currentPrompt = prompt;
 
@@ -779,11 +929,27 @@ export class WorkflowEngine {
         task: currentPrompt,
         cwd: this.cwd,
         schema: REVIEW_RESULT_SCHEMA,
+        onUpdate: (up) => {
+          if (up.tokens) lastTokens = up.tokens;
+          this.onProgress?.({
+            type: "node_update",
+            run,
+            nodeId,
+            agent: agents.reviewer,
+            action: `Reviewing diff (${reviewerId})...`,
+            durationMs: up.durationMs ?? (Date.now() - startTime),
+            tokens: up.tokens,
+            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+          });
+        },
       });
 
       const res = await this.executor.execute<ReviewResult>(req);
 
       if (res.status === "completed" && res.result) {
+        if (res.usage?.input) {
+          lastTokens = (res.usage.input || 0) + (res.usage.output || 0);
+        }
         const validation = validateReviewResult(res.result);
         if (validation.ok) {
           validation.data.reviewerId = reviewerId;
@@ -793,6 +959,28 @@ export class WorkflowEngine {
             state: run.state,
             node: nodeId,
           });
+
+          const isPass = validation.data.verdict === "PASS";
+          const findingsCount = validation.data.findings.length;
+          this.onProgress?.({
+            type: "node_end",
+            run,
+            nodeId,
+            agent: agents.reviewer,
+            action: isPass
+              ? `Verdict: PASS (0 findings, round ${round})`
+              : `Verdict: REQUEST_CHANGES (${findingsCount} finding(s), round ${round})`,
+            durationMs: Date.now() - startTime,
+            tokens: lastTokens,
+            details: {
+              verdict: validation.data.verdict,
+              findings: findingsCount,
+              findingList: validation.data.findings,
+              round,
+              reviewerId,
+            },
+          });
+
           return validation.data;
         }
         // Audit Finding 4 (§16/§46): a malformed verdict is an invalid
@@ -985,6 +1173,17 @@ export class WorkflowEngine {
       node: nodeId,
     });
 
+    const startTime = Date.now();
+    let lastTokens: number | undefined;
+
+    this.onProgress?.({
+      type: "node_start",
+      run,
+      nodeId,
+      agent: agents.worker,
+      action: `Fixing review findings (round ${fixRound})...`,
+    });
+
     // Collect findings from the most recent round that requested changes.
     // For test-gate-driven fixes this is empty; the failed tests are the
     // corrective input instead.
@@ -1024,9 +1223,25 @@ export class WorkflowEngine {
         context: "fresh",
         cwd: this.cwd,
         schema: FIX_RESULT_SCHEMA,
+        onUpdate: (up) => {
+          if (up.tokens) lastTokens = up.tokens;
+          this.onProgress?.({
+            type: "node_update",
+            run,
+            nodeId,
+            agent: agents.worker,
+            action: `Fixing review findings (round ${fixRound})...`,
+            durationMs: up.durationMs ?? (Date.now() - startTime),
+            tokens: up.tokens,
+            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+          });
+        },
       });
 
       if (execResult.status === "completed" && execResult.result) {
+        if (execResult.usage?.input) {
+          lastTokens = (execResult.usage.input || 0) + (execResult.usage.output || 0);
+        }
         const validation = validateFixResult(execResult.result);
         if (validation.ok) {
           fixData = validation.data;
@@ -1075,7 +1290,30 @@ export class WorkflowEngine {
     }
 
     fixData.round = fixRound;
-    return await this.settleFix(run, fixData, nodeId, fixRound);
+    const settledRun = await this.settleFix(run, fixData, nodeId, fixRound);
+
+    const passedTests = fixData.tests.filter((t) => t.status === "passed").length;
+    const fixFailedTests = fixData.tests.filter((t) => t.status === "failed").length;
+    const totalTests = fixData.tests.length;
+
+    this.onProgress?.({
+      type: "node_end",
+      run: settledRun,
+      nodeId,
+      agent: agents.worker,
+      action: `Fix round ${fixRound} completed (${fixData.changedFiles.length} file(s) modified, ${passedTests}/${totalTests} tests passed)`,
+      durationMs: Date.now() - startTime,
+      tokens: lastTokens,
+      details: {
+        changedFiles: fixData.changedFiles.map((f) => f.path),
+        addressedFindings: fixData.addressedFindings,
+        passedTests,
+        failedTests: fixFailedTests,
+        totalTests,
+      },
+    });
+
+    return settledRun;
   }
 
   /**

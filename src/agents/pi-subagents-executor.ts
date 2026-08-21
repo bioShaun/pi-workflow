@@ -1,9 +1,11 @@
 import * as crypto from "node:crypto";
 import {
   SUBAGENT_DELEGATION_REQUEST_EVENT,
+  SUBAGENT_DELEGATION_UPDATE_EVENT,
   SUBAGENT_DELEGATION_RESPONSE_EVENT,
   SUBAGENT_DELEGATION_CANCEL_EVENT,
   type SubagentDelegationRequest,
+  type SubagentDelegationUpdate,
   type SubagentDelegationResponse,
   type SubagentDelegationCancel,
 } from "pi-subagents/delegation";
@@ -47,16 +49,49 @@ export class PiSubagentsExecutor implements AgentExecutor {
       },
     };
 
-    return new Promise<AgentExecutionResult<T>>((resolve) => {
+    return new Promise<AgentExecutionResult<T>>((resolve, reject) => {
       let timeoutTimer: NodeJS.Timeout | undefined;
       let settled = false;
 
       const cleanup = () => {
         if (timeoutTimer) clearTimeout(timeoutTimer);
-        unsubscribe();
+        unsubscribeResponse();
+        unsubscribeUpdate();
       };
 
-      const unsubscribe = this.pi.events.on(
+      const unsubscribeUpdate = this.pi.events.on(
+        SUBAGENT_DELEGATION_UPDATE_EVENT,
+        (payload: unknown) => {
+          if (settled) return;
+          const update = payload as SubagentDelegationUpdate;
+          if (!update || update.requestId !== requestId) return;
+          if (
+            update.ownerRunId !== request.workflowRunId ||
+            update.nodeId !== request.nodeId
+          ) {
+            return;
+          }
+
+          if (request.onUpdate) {
+            request.onUpdate({
+              runId: update.runId,
+              nodeId: update.nodeId,
+              agent: request.agent,
+              currentTool: update.currentTool,
+              currentToolArgs: update.currentToolArgs,
+              recentOutput: update.recentOutput,
+              recentOutputLines: update.recentOutputLines,
+              recentTools: update.recentTools,
+              model: update.model,
+              toolCount: update.toolCount,
+              durationMs: update.durationMs,
+              tokens: update.tokens,
+            });
+          }
+        }
+      );
+
+      const unsubscribeResponse = this.pi.events.on(
         SUBAGENT_DELEGATION_RESPONSE_EVENT,
         (payload: unknown) => {
           if (settled) return;
@@ -132,7 +167,16 @@ export class PiSubagentsExecutor implements AgentExecutor {
         }, request.timeoutMs);
       }
 
-      this.pi.events.emit(SUBAGENT_DELEGATION_REQUEST_EVENT, delegationReq);
+      // If the bus rejects the request emit, the delegation can never
+      // settle through a response: mark the operation settled, detach both
+      // listeners (and any timeout), and surface the transport failure.
+      try {
+        this.pi.events.emit(SUBAGENT_DELEGATION_REQUEST_EVENT, delegationReq);
+      } catch (err) {
+        settled = true;
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 }

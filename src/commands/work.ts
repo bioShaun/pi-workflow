@@ -8,16 +8,102 @@ import {
   renderCompleted,
   renderAborted,
   renderRunError,
+  renderTraceLine,
+  formatWorkingBreadcrumb,
 } from "./renderer.ts";
 import { WorkflowEngine } from "../engine/engine.ts";
+import type { WorkflowProgressEvent } from "../engine/engine.ts";
 import { PiSubagentsExecutor } from "../agents/pi-subagents-executor.ts";
 
+export type NotifyFn = (msg: string, type: "info" | "warning" | "error") => void;
+
+/**
+ * Maps workflow progress events onto the command-layer UI: live breadcrumbs
+ * via setWorkingMessage and compact trace lines via notify. Exported so the
+ * status mapping (review verdicts, fix test outcomes) is unit-testable.
+ */
+export function createProgressNotifier(
+  notify: NotifyFn,
+  setWorking: (msg?: string) => void
+): (event: WorkflowProgressEvent) => void {
+  return (event: WorkflowProgressEvent) => {
+    if (event.type === "node_start") {
+      setWorking(formatWorkingBreadcrumb(event.agent ?? event.nodeId, event.action ?? "Working..."));
+    } else if (event.type === "node_update") {
+      setWorking(
+        formatWorkingBreadcrumb(
+          event.agent ?? event.nodeId,
+          event.action ?? "Working...",
+          event.details?.currentTool as string | undefined,
+          event.durationMs,
+          event.tokens
+        )
+      );
+    } else if (event.type === "node_end") {
+      let traceDetails: string[] | undefined;
+      let traceStatus: "success" | "warning" | "error" = "success";
+
+      if (event.nodeId.startsWith("review")) {
+        const verdict = event.details?.verdict as string | undefined;
+        if (verdict === "REQUEST_CHANGES") {
+          traceStatus = "warning";
+          const findingList = event.details?.findingList as Array<{ severity: string; description: string; file?: string }> | undefined;
+          if (findingList && findingList.length > 0) {
+            traceDetails = findingList.map(
+              (f) => `[${f.severity.toUpperCase()}] ${f.description}${f.file ? ` (${f.file})` : ""}`
+            );
+          }
+        }
+      } else if (event.nodeId.startsWith("fix")) {
+        // The fix node itself completed, but the tests the fix worker ran
+        // may not all pass: surface that instead of a success checkmark.
+        const totalTests = (event.details?.totalTests as number | undefined) ?? 0;
+        const passedTests = (event.details?.passedTests as number | undefined) ?? 0;
+        const failedTests = (event.details?.failedTests as number | undefined) ?? 0;
+        if (failedTests > 0) {
+          traceStatus = "error";
+          traceDetails = [`Fix worker reported ${failedTests} failed test(s) (${passedTests}/${totalTests} passed)`];
+        } else if (totalTests > 0 && passedTests < totalTests) {
+          traceStatus = "warning";
+          traceDetails = [`${totalTests - passedTests} test(s) did not pass (${passedTests}/${totalTests} passed)`];
+        }
+      }
+
+      notify(
+        renderTraceLine({
+          status: traceStatus,
+          agent: event.agent ?? event.nodeId,
+          action: event.action ?? "Completed",
+          durationMs: event.durationMs,
+          tokens: event.tokens,
+          details: traceDetails,
+        }),
+        traceStatus === "warning" ? "warning" : traceStatus === "error" ? "error" : "info"
+      );
+    }
+  };
+}
+
 export function registerWorkCommand(pi: ExtensionAPI): void {
-  const getEngine = (cwd: string) => {
+  const getEngine = (ctx: ExtensionCommandContext) => {
     const executor = new PiSubagentsExecutor(pi as any);
+
+    const notify = (msg: string, type: "info" | "warning" | "error" = "info") => {
+      if ((ctx as any).ui?.notify) {
+        (ctx as any).ui.notify(msg, type);
+      }
+    };
+
+    const setWorking = (msg?: string) => {
+      if ((ctx as any).ui?.setWorkingMessage) {
+        (ctx as any).ui.setWorkingMessage(msg);
+      }
+    };
+
     return new WorkflowEngine({
-      cwd,
+      cwd: ctx.cwd,
       executor,
+      onProgress: createProgressNotifier(notify, setWorking),
     });
   };
 
@@ -45,7 +131,7 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const parsed = parseWorkArgs(args);
-      const engine = getEngine(ctx.cwd);
+      const engine = getEngine(ctx);
 
       const notify = (msg: string, type: "info" | "warning" | "error" = "info") => {
         if ((ctx as any).ui?.notify) {
@@ -179,6 +265,10 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
         }
       } catch (err: any) {
         notify(`Workflow error: ${err?.message ?? String(err)}`, "error");
+      } finally {
+        if ((ctx as any).ui?.setWorkingMessage) {
+          (ctx as any).ui.setWorkingMessage();
+        }
       }
     },
   });
