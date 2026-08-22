@@ -133,8 +133,7 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
       "Deterministic workflow orchestrator: /work [auto|plan|implement|review|fix|status|resume|abort|help]",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const sub = (prefix ?? "").split(" ")[0].toLowerCase();
-      const items: AutocompleteItem[] = [
-        "",
+      const candidates = [
         "auto ",
         "plan ",
         "implement",
@@ -145,9 +144,10 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
         "abort",
         "list",
         "help",
-      ]
-        .filter((c) => c === "" || c.startsWith(sub))
-        .map((c) => ({ value: c, label: c || "auto" }));
+      ];
+      const items: AutocompleteItem[] = candidates
+        .filter((c) => c.startsWith(sub))
+        .map((c) => ({ value: c, label: c.trim() }));
       return items.length ? items : null;
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {

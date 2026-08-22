@@ -397,5 +397,37 @@ describe("CLI Parser and UX Renderer", () => {
       assert.ok(notifications.length >= 1, "handler notified the UI");
       assert.equal(working[working.length - 1], undefined, "finally path clears the working message");
     });
+
+    it("provides accurate argument completions without duplicate or ghost entries", () => {
+      let registered: {
+        getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null;
+      } | undefined;
+      const pi = {
+        registerCommand: (name: string, cfg: unknown) => {
+          registered = cfg as typeof registered;
+        },
+      } as any;
+      registerWorkCommand(pi);
+      assert.ok(registered?.getArgumentCompletions);
+
+      const completionsEmpty = registered.getArgumentCompletions("");
+      assert.ok(completionsEmpty);
+      assert.equal(completionsEmpty.length, 10);
+      assert.ok(!completionsEmpty.some((item) => item.value === ""));
+
+      const completionsA = registered.getArgumentCompletions("a");
+      assert.deepEqual(completionsA, [
+        { value: "auto ", label: "auto" },
+        { value: "abort", label: "abort" },
+      ]);
+
+      const completionsP = registered.getArgumentCompletions("p");
+      assert.deepEqual(completionsP, [
+        { value: "plan ", label: "plan" },
+      ]);
+
+      const completionsZ = registered.getArgumentCompletions("xyz");
+      assert.equal(completionsZ, null);
+    });
   });
 });
