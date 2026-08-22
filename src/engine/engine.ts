@@ -30,7 +30,6 @@ import { evaluateCompletionGate } from "../gates/completion-gate.ts";
 import { resolveWorkflowMode } from "../policies/complexity.ts";
 import { RetryPolicy } from "../policies/retry.ts";
 import { isForkUnavailableError } from "../policies/fork.ts";
-import { isIntercomDetachError, INTERCOM_RETRY_REMINDER } from "../policies/intercom.ts";
 import { isWorkerRefusalError, wrapWorkerRefusal } from "../policies/refusal.ts";
 import { buildScoutPrompt } from "../prompts/scout.ts";
 import { buildPlannerPrompt } from "../prompts/planner.ts";
@@ -59,8 +58,10 @@ import {
 } from "./errors.ts";
 import {
   type AgentExecutor,
+  type AgentProgressUpdate,
   createReviewerExecutionRequest,
 } from "../agents/executor.ts";
+import { executeNodeWithRetry, type NodeTokenTracker } from "./node-execution.ts";
 import {
   validateWorkflowPreflight,
   type WorkflowRole,
@@ -82,6 +83,45 @@ export function generateWorkflowRunId(): string {
   const ss = pad(now.getSeconds());
   const rand = crypto.randomBytes(2).toString("hex");
   return `wf_${y}${m}${d}_${hh}${mm}${ss}_${rand}`;
+}
+
+/**
+ * Deterministic PlanResult for the spec-driven flow (/work spec). No LLM is
+ * involved: the specification itself — embedded verbatim in the run request
+ * — is the authoritative plan, so every node prompt (worker, reviewer,
+ * fixer) renders it through the "Original Requirement" section. The
+ * synthesized plan only steers structure; the required test entry feeds the
+ * worker's "Verification Tests to Run" section (the test gate itself
+ * classifies the worker-reported tests).
+ */
+export function synthesizeSpecPlan(specPath: string): PlanResult {
+  return {
+    summary: `Implement the specification "${specPath}" faithfully and completely.`,
+    understanding:
+      "This run is spec-driven: the specification reproduced in the Original Requirement section " +
+      "is the authoritative plan. Read it in full, implement everything it requires, and treat its " +
+      "acceptance criteria as the definition of done.",
+    files: [
+      {
+        path: specPath,
+        purpose: "Specification document (authoritative requirements; read-only)",
+        action: "inspect",
+      },
+    ],
+    steps: [
+      { id: "1", description: `Read the specification "${specPath}" in full (see Original Requirement)` },
+      { id: "2", description: "Implement everything the specification requires, following repository conventions" },
+      {
+        id: "3",
+        description: "Run the test suite and any verification the specification requires; report results honestly",
+      },
+    ],
+    tests: [{ description: "The project's test suite passes after implementation", required: true }],
+    risks: [],
+    assumptions: ["The specification is complete, unambiguous, and authoritative for this run"],
+    complexity: "medium",
+    requiresSecondReviewer: false,
+  };
 }
 
 export interface WorkflowProgressEvent {
@@ -226,12 +266,14 @@ export class WorkflowEngine {
   /**
    * Audit Finding 10: run preflight for a mode and return the resolved
    * role → agent mapping. Throws preflight_failed before any modification.
+   * `requiredRoles` narrows the checked set (the spec-driven flow runs no
+   * scout or planner node).
    */
-  private async preflightForMode(mode: WorkflowMode): Promise<AgentRoles> {
+  private async preflightForMode(mode: WorkflowMode, requiredRoles?: WorkflowRole[]): Promise<AgentRoles> {
     if (this.preflightOverride) {
       return this.preflightOverride(mode);
     }
-    const preflight = await validateWorkflowPreflight(this.config, this.cwd, mode);
+    const preflight = await validateWorkflowPreflight(this.config, this.cwd, mode, undefined, requiredRoles);
     if (!preflight.ok) {
       throw new WorkflowError("preflight_failed", preflight.error ?? "Preflight checks failed", {
         details: preflight.diagnostics,
@@ -393,6 +435,39 @@ export class WorkflowEngine {
 
   // --- Workflow Node Executors ---
 
+  /**
+   * Forwards one agent progress update as a node_update progress event and
+   * records the streaming token estimate. Shared by every node executor's
+   * request factory (previously repeated inline per node).
+   */
+  private forwardNodeProgress(
+    run: WorkflowRun,
+    nodeId: string,
+    agent: string,
+    action: string,
+    startedAt: number,
+    tokenTracker: NodeTokenTracker,
+    update: AgentProgressUpdate
+  ): void {
+    if (update.tokens) {
+      tokenTracker.tokens = update.tokens;
+    }
+    this.onProgress?.({
+      type: "node_update",
+      run,
+      nodeId,
+      agent,
+      action,
+      durationMs: update.durationMs ?? (Date.now() - startedAt),
+      tokens: update.tokens,
+      details: {
+        currentTool: update.currentTool,
+        currentToolArgs: update.currentToolArgs,
+        recentOutput: update.recentOutput,
+      },
+    });
+  }
+
   async executeScoutNode(
     run: WorkflowRun,
     agents: AgentRoles,
@@ -415,7 +490,7 @@ export class WorkflowEngine {
     });
 
     const startTime = Date.now();
-    let lastTokens: number | undefined;
+    const tokenTracker: NodeTokenTracker = {};
 
     this.onProgress?.({
       type: "node_start",
@@ -426,84 +501,47 @@ export class WorkflowEngine {
     });
 
     const taskPrompt = buildScoutPrompt({ task: run.request });
-    let scoutData: ScoutResult | undefined;
-    let attempt = 1;
-    let currentPrompt = taskPrompt;
-
-    while (attempt <= 2) {
-      const result = await this.executor.execute<ScoutResult>({
+    const scoutData = await executeNodeWithRetry<ScoutResult>({
+      nodeId: "scout",
+      nodeLabel: "Scout node",
+      taskPrompt,
+      requestFactory: (prompt) => ({
         workflowRunId: run.id,
         nodeId: "scout",
         agent: agents.scout,
-        task: currentPrompt,
+        task: prompt,
         context: "fresh",
         cwd: this.cwd,
         schema: SCOUT_RESULT_SCHEMA,
-        onUpdate: (up) => {
-          if (up.tokens) lastTokens = up.tokens;
-          this.onProgress?.({
-            type: "node_update",
+        onUpdate: (up) =>
+          this.forwardNodeProgress(
             run,
-            nodeId: "scout",
-            agent: agents.scout,
-            action: "Exploring repository structure...",
-            durationMs: up.durationMs ?? (Date.now() - startTime),
-            tokens: up.tokens,
-            details: {
-              currentTool: up.currentTool,
-              currentToolArgs: up.currentToolArgs,
-              recentOutput: up.recentOutput,
-            },
-          });
-        },
-      });
-
-      if (result.status === "completed" && result.result) {
-        if (result.usage?.input) {
-          lastTokens = (result.usage.input || 0) + (result.usage.output || 0);
-        }
-        const validation = validateScoutResult(result.result);
-        if (validation.ok) {
-          scoutData = validation.data;
-          break;
-        }
-        const action = this.retryPolicy.evaluateValidationFailure(attempt, validation.error, "ScoutResult");
-        if (action.type === "retry_validation") {
-          currentPrompt = `${taskPrompt}\n\n${action.correctionPrompt}`;
-          attempt++;
-          continue;
-        }
-        throw new WorkflowError(
-          "invalid_structured_output",
-          `Scout node returned an invalid result: ${validation.error}`,
-          { nodeId: "scout" }
-        );
-      }
-
-      const execError = result.error ?? "Execution failed";
-      const action = this.retryPolicy.evaluateAgentExecutionFailure(attempt, execError);
-      if (action.type === "retry_agent") {
-        await this.sleep(action.delayMs); // audit Finding 9
-        // Audit Finding 13: an intercom-detached child actually finished its
-        // work but called a coordination tool; retry with a hard prohibition.
-        if (isIntercomDetachError(execError)) {
-          currentPrompt = `${currentPrompt}\n\n${INTERCOM_RETRY_REMINDER}`;
-        }
-        attempt++;
-        continue;
-      }
-      throw new WorkflowError(
-        "agent_execution_failed",
-        `Scout node failed: ${result.error ?? "No result returned"}`,
-        { nodeId: "scout" }
-      );
-    }
-
-    if (!scoutData) {
-      throw new WorkflowError("invalid_structured_output", "Scout node produced no valid result", {
-        nodeId: "scout",
-      });
-    }
+            "scout",
+            agents.scout,
+            "Exploring repository structure...",
+            startTime,
+            tokenTracker,
+            up
+          ),
+      }),
+      executor: this.executor,
+      retryPolicy: this.retryPolicy,
+      sleep: this.sleep,
+      tokenTracker,
+      schemaDescription: "ScoutResult",
+      terminalErrorDetail: "No result returned",
+      validate: (result) => {
+        const validation = validateScoutResult(result);
+        return validation.ok
+          ? { ok: true, data: validation.data }
+          : {
+              ok: false,
+              validationError: validation.error,
+              terminalMessage: `Scout node returned an invalid result: ${validation.error}`,
+            };
+      },
+      fallbackMessage: "Scout node produced no valid result",
+    });
 
     await saveArtifact(this.baseDir, run.id, "scout.json", scoutData);
     await appendWorkflowEvent(this.baseDir, run.id, {
@@ -519,7 +557,7 @@ export class WorkflowEngine {
       agent: agents.scout,
       action: `Scouted repository (${scoutData.relevantFiles.length} key file(s) identified)`,
       durationMs: Date.now() - startTime,
-      tokens: lastTokens,
+      tokens: tokenTracker.tokens,
       details: { relevantFiles: scoutData.relevantFiles },
     });
 
@@ -544,7 +582,7 @@ export class WorkflowEngine {
     });
 
     const startTime = Date.now();
-    let lastTokens: number | undefined;
+    const tokenTracker: NodeTokenTracker = {};
 
     this.onProgress?.({
       type: "node_start",
@@ -555,67 +593,49 @@ export class WorkflowEngine {
     });
 
     const taskPrompt = buildPlannerPrompt({ task: run.request, scout });
-    let planData: PlanResult | undefined;
-    let attempt = 1;
-    let currentPrompt = taskPrompt;
     // The planner uses "fork" (spec §8) and degrades to "fresh" when the
     // parent session is not yet persisted (audit Finding 1).
     let context: "fresh" | "fork" = "fork";
 
-    while (attempt <= 2) {
-      const execResult = await this.executor.execute<PlanResult>({
+    const planData = await executeNodeWithRetry<PlanResult>({
+      nodeId: "plan",
+      nodeLabel: "Planner node",
+      taskPrompt,
+      requestFactory: (prompt) => ({
         workflowRunId: run.id,
         nodeId: "plan",
         agent: agents.planner,
-        task: currentPrompt,
+        task: prompt,
         context,
         cwd: this.cwd,
         schema: PLAN_RESULT_SCHEMA,
-        onUpdate: (up) => {
-          if (up.tokens) lastTokens = up.tokens;
-          this.onProgress?.({
-            type: "node_update",
+        onUpdate: (up) =>
+          this.forwardNodeProgress(
             run,
-            nodeId: "plan",
-            agent: agents.planner,
-            action: "Formulating implementation plan...",
-            durationMs: up.durationMs ?? (Date.now() - startTime),
-            tokens: up.tokens,
-            details: {
-              currentTool: up.currentTool,
-              currentToolArgs: up.currentToolArgs,
-              recentOutput: up.recentOutput,
-            },
-          });
-        },
-      });
-
-      if (execResult.status === "completed" && execResult.result) {
-        if (execResult.usage?.input) {
-          lastTokens = (execResult.usage.input || 0) + (execResult.usage.output || 0);
-        }
-        const gate = evaluatePlanGate(execResult.result);
+            "plan",
+            agents.planner,
+            "Formulating implementation plan...",
+            startTime,
+            tokenTracker,
+            up
+          ),
+      }),
+      executor: this.executor,
+      retryPolicy: this.retryPolicy,
+      sleep: this.sleep,
+      tokenTracker,
+      validate: (result) => {
+        const gate = evaluatePlanGate(result);
         if (gate.pass && gate.plan) {
-          planData = gate.plan;
-          break;
-        } else {
-          const action = this.retryPolicy.evaluateValidationFailure(
-            attempt,
-            gate.error ?? "Invalid plan structure"
-          );
-          if (action.type === "retry_validation") {
-            currentPrompt = `${taskPrompt}\n\n${action.correctionPrompt}`;
-            attempt++;
-            continue;
-          } else {
-            throw new WorkflowError("invalid_structured_output", gate.error ?? "Plan gate validation failed", {
-              nodeId: "plan",
-            });
-          }
+          return { ok: true, data: gate.plan };
         }
-      } else {
-        const execError = execResult.error ?? "Execution failed";
-
+        return {
+          ok: false,
+          validationError: gate.error ?? "Invalid plan structure",
+          terminalMessage: gate.error ?? "Plan gate validation failed",
+        };
+      },
+      onExecutionFailure: async (execError) => {
         if (context === "fork" && isForkUnavailableError(execError)) {
           // A deterministic fork-unavailability is NOT an agent failure:
           // degrade to a fresh context without consuming the agent retry
@@ -628,30 +648,12 @@ export class WorkflowEngine {
             node: "plan",
             details: { reason: execError },
           });
-          continue;
+          return true;
         }
-
-        const action = this.retryPolicy.evaluateAgentExecutionFailure(attempt, execError);
-        if (action.type === "retry_agent") {
-          await this.sleep(action.delayMs); // audit Finding 9
-          // Audit Finding 13: retry intercom-detached children with a hard prohibition.
-          if (isIntercomDetachError(execError)) {
-            currentPrompt = `${currentPrompt}\n\n${INTERCOM_RETRY_REMINDER}`;
-          }
-          attempt++;
-          continue;
-        }
-        throw new WorkflowError(
-          "agent_execution_failed",
-          `Planner node failed: ${execError}`,
-          { nodeId: "plan" }
-        );
-      }
-    }
-
-    if (!planData) {
-      throw new WorkflowError("invalid_structured_output", "Plan generation failed", { nodeId: "plan" });
-    }
+        return false;
+      },
+      fallbackMessage: "Plan generation failed",
+    });
 
     run.plan = planData;
     run.complexity = planData.complexity;
@@ -680,7 +682,7 @@ export class WorkflowEngine {
       agent: agents.planner,
       action: `Plan approved (${planData.steps.length} step(s), ${planData.complexity} complexity)`,
       durationMs: Date.now() - startTime,
-      tokens: lastTokens,
+      tokens: tokenTracker.tokens,
       details: { steps: planData.steps.length, files: planData.files.length, complexity: planData.complexity },
     });
 
@@ -705,7 +707,7 @@ export class WorkflowEngine {
     });
 
     const startTime = Date.now();
-    let lastTokens: number | undefined;
+    const tokenTracker: NodeTokenTracker = {};
 
     this.onProgress?.({
       type: "node_start",
@@ -717,62 +719,47 @@ export class WorkflowEngine {
 
     const scout = await this.loadScoutArtifact(run.id);
     const taskPrompt = buildWorkerPrompt({ task: run.request, plan: approvedPlan, scout });
-    let implData: ImplementationResult | undefined;
-    let attempt = 1;
-    let currentPrompt = taskPrompt;
-
-    while (attempt <= 2) {
-      const execResult = await this.executor.execute<ImplementationResult>({
+    const implData = await executeNodeWithRetry<ImplementationResult>({
+      nodeId: "implement",
+      nodeLabel: "Worker node",
+      taskPrompt,
+      requestFactory: (prompt) => ({
         workflowRunId: run.id,
         nodeId: "implement",
         agent: agents.worker,
-        task: currentPrompt,
+        task: prompt,
         context: "fresh",
         cwd: this.cwd,
         schema: IMPLEMENTATION_RESULT_SCHEMA,
-        onUpdate: (up) => {
-          if (up.tokens) lastTokens = up.tokens;
-          this.onProgress?.({
-            type: "node_update",
+        onUpdate: (up) =>
+          this.forwardNodeProgress(
             run,
-            nodeId: "implement",
-            agent: agents.worker,
-            action: "Executing implementation changes...",
-            durationMs: up.durationMs ?? (Date.now() - startTime),
-            tokens: up.tokens,
-            details: {
-              currentTool: up.currentTool,
-              currentToolArgs: up.currentToolArgs,
-              recentOutput: up.recentOutput,
-            },
-          });
-        },
-      });
-
-      if (execResult.status === "completed" && execResult.result) {
-        if (execResult.usage?.input) {
-          lastTokens = (execResult.usage.input || 0) + (execResult.usage.output || 0);
-        }
-        const validation = validateImplementationResult(execResult.result);
-        if (validation.ok) {
-          implData = validation.data;
-          break;
-        }
-        // Audit Finding 4 (§16): validate the worker's structured output and
-        // retry once with a schema-correction instruction.
-        const action = this.retryPolicy.evaluateValidationFailure(attempt, validation.error, "ImplementationResult");
-        if (action.type === "retry_validation") {
-          currentPrompt = `${taskPrompt}\n\n${action.correctionPrompt}`;
-          attempt++;
-          continue;
-        }
-        throw new WorkflowError(
-          "invalid_structured_output",
-          `Worker returned an invalid result: ${validation.error}`,
-          { nodeId: "implement" }
-        );
-      } else {
-        const execError = execResult.error ?? "Worker execution failed";
+            "implement",
+            agents.worker,
+            "Executing implementation changes...",
+            startTime,
+            tokenTracker,
+            up
+          ),
+      }),
+      executor: this.executor,
+      retryPolicy: this.retryPolicy,
+      sleep: this.sleep,
+      tokenTracker,
+      schemaDescription: "ImplementationResult",
+      executionErrorDefault: "Worker execution failed",
+      terminalErrorDetail: "Unknown error",
+      validate: (result) => {
+        const validation = validateImplementationResult(result);
+        return validation.ok
+          ? { ok: true, data: validation.data }
+          : {
+              ok: false,
+              validationError: validation.error,
+              terminalMessage: `Worker returned an invalid result: ${validation.error}`,
+            };
+      },
+      onExecutionFailure: (execError) => {
         // Audit Finding 14: a zero-edit completion is a deterministic refusal
         // (or laziness) — a verbatim retry repeats it, so fail immediately.
         if (isWorkerRefusalError(execError)) {
@@ -780,30 +767,10 @@ export class WorkflowEngine {
             nodeId: "implement",
           });
         }
-        const action = this.retryPolicy.evaluateAgentExecutionFailure(attempt, execError);
-        if (action.type === "retry_agent") {
-          await this.sleep(action.delayMs); // audit Finding 9
-          // Audit Finding 13: retry intercom-detached children with a hard prohibition.
-          if (isIntercomDetachError(execError)) {
-            currentPrompt = `${currentPrompt}\n\n${INTERCOM_RETRY_REMINDER}`;
-          }
-          attempt++;
-          continue;
-        } else {
-          throw new WorkflowError(
-            "agent_execution_failed",
-            `Worker node failed: ${execResult.error ?? "Unknown error"}`,
-            { nodeId: "implement" }
-          );
-        }
-      }
-    }
-
-    if (!implData) {
-      throw new WorkflowError("invalid_structured_output", "Worker produced no valid result", {
-        nodeId: "implement",
-      });
-    }
+        return false;
+      },
+      fallbackMessage: "Worker produced no valid result",
+    });
 
     run.implementation = implData;
     await saveArtifact(this.baseDir, run.id, "implementation.json", implData);
@@ -845,7 +812,7 @@ export class WorkflowEngine {
       agent: agents.worker,
       action: `Implementation completed (${implData.changedFiles.length} file(s) changed, ${passedTests}/${totalTests} tests passed)`,
       durationMs: Date.now() - startTime,
-      tokens: lastTokens,
+      tokens: tokenTracker.tokens,
       details: {
         changedFiles: implData.changedFiles.map((f) => f.path),
         passedTests,
@@ -921,7 +888,7 @@ export class WorkflowEngine {
     });
 
     const startTime = Date.now();
-    let lastTokens: number | undefined;
+    const tokenTracker: NodeTokenTracker = {};
 
     this.onProgress?.({
       type: "node_start",
@@ -931,109 +898,82 @@ export class WorkflowEngine {
       action: `Independent review in progress (${reviewerId}, fresh context)...`,
     });
 
-    let attempt = 1;
-    let currentPrompt = prompt;
+    const reviewData = await executeNodeWithRetry<ReviewResult>({
+      nodeId,
+      nodeLabel: `Reviewer ${nodeId}`,
+      taskPrompt: prompt,
+      requestFactory: (currentPrompt) =>
+        createReviewerExecutionRequest<ReviewResult>({
+          workflowRunId: run.id,
+          nodeId,
+          agent: agents.reviewer,
+          task: currentPrompt,
+          cwd: this.cwd,
+          schema: REVIEW_RESULT_SCHEMA,
+          onUpdate: (up) =>
+            this.forwardNodeProgress(
+              run,
+              nodeId,
+              agents.reviewer,
+              `Reviewing diff (${reviewerId})...`,
+              startTime,
+              tokenTracker,
+              up
+            ),
+        }),
+      executor: this.executor,
+      retryPolicy: this.retryPolicy,
+      sleep: this.sleep,
+      tokenTracker,
+      schemaDescription: "ReviewResult",
+      executionErrorDefault: "Reviewer execution failed",
+      terminalErrorDetail: "No result",
+      validate: (result) => {
+        const validation = validateReviewResult(result);
+        return validation.ok
+          ? { ok: true, data: validation.data }
+          : {
+              ok: false,
+              validationError: validation.error,
+              terminalMessage: `Reviewer ${nodeId} returned an invalid review: ${validation.error}`,
+            };
+      },
+      // Stamp the review identity and mark the node complete before the
+      // terminal progress event is emitted by the caller.
+      onValidated: async (data) => {
+        data.reviewerId = reviewerId;
+        data.round = round;
+        await appendWorkflowEvent(this.baseDir, run.id, {
+          event: "node.completed",
+          state: run.state,
+          node: nodeId,
+        });
+      },
+      fallbackMessage: `Reviewer ${nodeId} produced no valid result`,
+    });
 
-    while (attempt <= 2) {
-      const req = createReviewerExecutionRequest<ReviewResult>({
-        workflowRunId: run.id,
-        nodeId,
-        agent: agents.reviewer,
-        task: currentPrompt,
-        cwd: this.cwd,
-        schema: REVIEW_RESULT_SCHEMA,
-        onUpdate: (up) => {
-          if (up.tokens) lastTokens = up.tokens;
-          this.onProgress?.({
-            type: "node_update",
-            run,
-            nodeId,
-            agent: agents.reviewer,
-            action: `Reviewing diff (${reviewerId})...`,
-            durationMs: up.durationMs ?? (Date.now() - startTime),
-            tokens: up.tokens,
-            details: {
-              currentTool: up.currentTool,
-              currentToolArgs: up.currentToolArgs,
-              recentOutput: up.recentOutput,
-            },
-          });
-        },
-      });
+    const isPass = reviewData.verdict === "PASS";
+    const findingsCount = reviewData.findings.length;
+    this.onProgress?.({
+      type: "node_end",
+      run,
+      nodeId,
+      agent: agents.reviewer,
+      action: isPass
+        ? `Verdict: PASS (0 findings, round ${round})`
+        : `Verdict: REQUEST_CHANGES (${findingsCount} finding(s), round ${round})`,
+      durationMs: Date.now() - startTime,
+      tokens: tokenTracker.tokens,
+      details: {
+        verdict: reviewData.verdict,
+        findings: findingsCount,
+        findingList: reviewData.findings,
+        round,
+        reviewerId,
+      },
+    });
 
-      const res = await this.executor.execute<ReviewResult>(req);
-
-      if (res.status === "completed" && res.result) {
-        if (res.usage?.input) {
-          lastTokens = (res.usage.input || 0) + (res.usage.output || 0);
-        }
-        const validation = validateReviewResult(res.result);
-        if (validation.ok) {
-          validation.data.reviewerId = reviewerId;
-          validation.data.round = round;
-          await appendWorkflowEvent(this.baseDir, run.id, {
-            event: "node.completed",
-            state: run.state,
-            node: nodeId,
-          });
-
-          const isPass = validation.data.verdict === "PASS";
-          const findingsCount = validation.data.findings.length;
-          this.onProgress?.({
-            type: "node_end",
-            run,
-            nodeId,
-            agent: agents.reviewer,
-            action: isPass
-              ? `Verdict: PASS (0 findings, round ${round})`
-              : `Verdict: REQUEST_CHANGES (${findingsCount} finding(s), round ${round})`,
-            durationMs: Date.now() - startTime,
-            tokens: lastTokens,
-            details: {
-              verdict: validation.data.verdict,
-              findings: findingsCount,
-              findingList: validation.data.findings,
-              round,
-              reviewerId,
-            },
-          });
-
-          return validation.data;
-        }
-        // Audit Finding 4 (§16/§46): a malformed verdict is an invalid
-        // structured output, not a "not PASS" verdict.
-        const action = this.retryPolicy.evaluateValidationFailure(attempt, validation.error, "ReviewResult");
-        if (action.type === "retry_validation") {
-          currentPrompt = `${prompt}\n\n${action.correctionPrompt}`;
-          attempt++;
-          continue;
-        }
-        throw new WorkflowError(
-          "invalid_structured_output",
-          `Reviewer ${nodeId} returned an invalid review: ${validation.error}`,
-          { nodeId }
-        );
-      }
-
-      const execError = res.error ?? "Reviewer execution failed";
-      const action = this.retryPolicy.evaluateAgentExecutionFailure(attempt, execError);
-      if (action.type === "retry_agent") {
-        await this.sleep(action.delayMs); // audit Finding 9
-        // Audit Finding 13: retry intercom-detached children with a hard prohibition.
-        if (isIntercomDetachError(execError)) {
-          currentPrompt = `${currentPrompt}\n\n${INTERCOM_RETRY_REMINDER}`;
-        }
-        attempt++;
-        continue;
-      }
-      throw new WorkflowError(
-        "agent_execution_failed",
-        `Reviewer ${nodeId} failed: ${res.error ?? "No result"}`,
-        { nodeId }
-      );
-    }
-
-    throw new WorkflowError("invalid_structured_output", `Reviewer ${nodeId} produced no valid result`, { nodeId });
+    return reviewData;
   }
 
   async executeReviewNode(run: WorkflowRun, agents: AgentRoles): Promise<WorkflowRun> {
@@ -1191,7 +1131,7 @@ export class WorkflowEngine {
     });
 
     const startTime = Date.now();
-    let lastTokens: number | undefined;
+    const tokenTracker: NodeTokenTracker = {};
 
     this.onProgress?.({
       type: "node_start",
@@ -1227,88 +1167,58 @@ export class WorkflowEngine {
       round: fixRound,
     });
 
-    let fixData: FixResult | undefined;
-    let attempt = 1;
-    let currentPrompt = taskPrompt;
-
-    while (attempt <= 2) {
-      const execResult = await this.executor.execute<FixResult>({
+    const fixData = await executeNodeWithRetry<FixResult>({
+      nodeId,
+      nodeLabel: "Fix worker",
+      taskPrompt,
+      requestFactory: (prompt) => ({
         workflowRunId: run.id,
         nodeId,
         agent: agents.worker,
-        task: currentPrompt,
+        task: prompt,
         context: "fresh",
         cwd: this.cwd,
         schema: FIX_RESULT_SCHEMA,
-        onUpdate: (up) => {
-          if (up.tokens) lastTokens = up.tokens;
-          this.onProgress?.({
-            type: "node_update",
+        onUpdate: (up) =>
+          this.forwardNodeProgress(
             run,
             nodeId,
-            agent: agents.worker,
-            action: `Fixing review findings (round ${fixRound})...`,
-            durationMs: up.durationMs ?? (Date.now() - startTime),
-            tokens: up.tokens,
-            details: {
-              currentTool: up.currentTool,
-              currentToolArgs: up.currentToolArgs,
-              recentOutput: up.recentOutput,
-            },
+            agents.worker,
+            `Fixing review findings (round ${fixRound})...`,
+            startTime,
+            tokenTracker,
+            up
+          ),
+      }),
+      executor: this.executor,
+      retryPolicy: this.retryPolicy,
+      sleep: this.sleep,
+      tokenTracker,
+      schemaDescription: "FixResult",
+      executionErrorDefault: "Fix worker execution failed",
+      terminalErrorDetail: "No result",
+      validate: (result) => {
+        const validation = validateFixResult(result);
+        return validation.ok
+          ? { ok: true, data: validation.data }
+          : {
+              ok: false,
+              validationError: validation.error,
+              terminalMessage: `Fix worker returned an invalid result: ${validation.error}`,
+            };
+      },
+      onExecutionFailure: (execError) => {
+        // Audit Finding 14: a zero-edit completion is a deterministic refusal
+        // (or laziness) — a verbatim retry repeats it, so fail immediately.
+        if (isWorkerRefusalError(execError)) {
+          throw new WorkflowError("agent_execution_failed", wrapWorkerRefusal("Fix worker", execError), {
+            nodeId,
           });
-        },
-      });
-
-      if (execResult.status === "completed" && execResult.result) {
-        if (execResult.usage?.input) {
-          lastTokens = (execResult.usage.input || 0) + (execResult.usage.output || 0);
         }
-        const validation = validateFixResult(execResult.result);
-        if (validation.ok) {
-          fixData = validation.data;
-          break;
-        }
-        const action = this.retryPolicy.evaluateValidationFailure(attempt, validation.error, "FixResult");
-        if (action.type === "retry_validation") {
-          currentPrompt = `${taskPrompt}\n\n${action.correctionPrompt}`;
-          attempt++;
-          continue;
-        }
-        throw new WorkflowError(
-          "invalid_structured_output",
-          `Fix worker returned an invalid result: ${validation.error}`,
-          { nodeId }
-        );
-      }
-
-      const execError = execResult.error ?? "Fix worker execution failed";
-      // Audit Finding 14: a zero-edit completion is a deterministic refusal
-      // (or laziness) — a verbatim retry repeats it, so fail immediately.
-      if (isWorkerRefusalError(execError)) {
-        throw new WorkflowError("agent_execution_failed", wrapWorkerRefusal("Fix worker", execError), {
-          nodeId,
-        });
-      }
-      const action = this.retryPolicy.evaluateAgentExecutionFailure(attempt, execError);
-      if (action.type === "retry_agent") {
-        await this.sleep(action.delayMs); // audit Finding 9
-        // Audit Finding 13: retry intercom-detached children with a hard prohibition.
-        if (isIntercomDetachError(execError)) {
-          currentPrompt = `${currentPrompt}\n\n${INTERCOM_RETRY_REMINDER}`;
-        }
-        attempt++;
-        continue;
-      }
-      throw new WorkflowError(
-        "agent_execution_failed",
-        `Fix worker failed: ${execResult.error ?? "No result"}`,
-        { nodeId }
-      );
-    }
-
-    if (!fixData) {
-      throw new WorkflowError("invalid_structured_output", "Fix worker produced no valid result", { nodeId });
-    }
+        return false;
+      },
+      fallbackMessage: "Fix worker produced no valid result",
+    });
 
     fixData.round = fixRound;
     const settledRun = await this.settleFix(run, fixData, nodeId, fixRound);
@@ -1324,7 +1234,7 @@ export class WorkflowEngine {
       agent: agents.worker,
       action: `Fix round ${fixRound} completed (${fixData.changedFiles.length} file(s) modified, ${passedTests}/${totalTests} tests passed)`,
       durationMs: Date.now() - startTime,
-      tokens: lastTokens,
+      tokens: tokenTracker.tokens,
       details: {
         changedFiles: fixData.changedFiles.map((f) => f.path),
         addressedFindings: fixData.addressedFindings,
@@ -1496,21 +1406,92 @@ export class WorkflowEngine {
     }
 
     try {
-      run = await this.executeWorkerNode(run, agents);
-
-      while (!WORKFLOW_TERMINAL_STATES.includes(run.state)) {
-        if (run.state === "testing" || run.state === "reviewing") {
-          run = await this.executeReviewNode(run, agents);
-        } else if (run.state === "fixing") {
-          run = await this.executeFixNode(run, agents);
-        } else {
-          break;
-        }
-      }
-      return run;
+      return await this.runExecutionLoop(run, agents);
     } catch (error) {
       return await this.markRunFailed(run, error);
     }
+  }
+
+  /**
+   * Spec-driven entry (/work spec): the user has already written the spec
+   * document, so no scout or planner agent runs. The engine reads the spec,
+   * synthesizes the PlanResult deterministically (the spec itself, embedded
+   * in the run request, is the authoritative plan), and drives the same
+   * bounded implement → review → fix loop as /work auto.
+   */
+  async startSpec(specPath: string, options?: { mode?: WorkflowMode }): Promise<WorkflowRun> {
+    const absoluteSpecPath = path.isAbsolute(specPath) ? specPath : path.join(this.cwd, specPath);
+    let specContent: string;
+    try {
+      specContent = await fs.readFile(absoluteSpecPath, "utf-8");
+    } catch (error) {
+      throw new WorkflowError(
+        "invalid_transition",
+        `Cannot read spec file "${specPath}": ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    if (!specContent.trim()) {
+      throw new WorkflowError("invalid_transition", `Spec file "${specPath}" is empty`);
+    }
+
+    const mode = options?.mode ?? this.config.defaultMode;
+    // The spec flow runs only the worker and reviewer nodes; planner/scout
+    // agents are not required to be configured at all (§29: fail before
+    // modifications, on exactly the roles this flow launches).
+    const agents = await this.preflightForMode(mode, ["worker", "reviewer"]);
+
+    const relativeSpecPath = path.relative(this.cwd, absoluteSpecPath) || specPath;
+    const request = [
+      `Spec-driven workflow: implement the specification document "${relativeSpecPath}", reproduced in full below.`,
+      "",
+      "--- SPECIFICATION BEGIN ---",
+      specContent.trim(),
+      "--- SPECIFICATION END ---",
+    ].join("\n");
+
+    let run = await this.createRun(request, mode, false);
+
+    try {
+      run.plan = synthesizeSpecPlan(relativeSpecPath);
+      run.complexity = run.plan.complexity;
+
+      await saveArtifact(this.baseDir, run.id, "plan.json", run.plan);
+      await saveArtifact(this.baseDir, run.id, "request.md", run.request);
+      await appendWorkflowEvent(this.baseDir, run.id, {
+        event: "spec.loaded",
+        state: run.state,
+        node: "spec",
+        details: { path: relativeSpecPath, characters: specContent.length },
+      });
+
+      run = await this.stateMachine.transition(run, "plan_ready", {
+        node: "spec",
+        reason: `Spec loaded from ${relativeSpecPath}; plan synthesized deterministically (no planner agent)`,
+      });
+
+      return await this.runExecutionLoop(run, agents);
+    } catch (error) {
+      return await this.markRunFailed(run, error);
+    }
+  }
+
+  /**
+   * The shared /work auto tail: worker → (review ↔ fix) loop until a
+   * terminal state or a state the loop cannot advance.
+   */
+  private async runExecutionLoop(run: WorkflowRun, agents: AgentRoles): Promise<WorkflowRun> {
+    run = await this.executeWorkerNode(run, agents);
+
+    while (!WORKFLOW_TERMINAL_STATES.includes(run.state)) {
+      if (run.state === "testing" || run.state === "reviewing") {
+        run = await this.executeReviewNode(run, agents);
+      } else if (run.state === "fixing") {
+        run = await this.executeFixNode(run, agents);
+      } else {
+        break;
+      }
+    }
+    return run;
   }
 
   async resume(runId?: string): Promise<WorkflowRun> {

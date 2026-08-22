@@ -66,6 +66,7 @@ export class WorkflowLiveWidget {
   public handleTerminalInput(data: string): { consume?: boolean; data?: string } | undefined {
     if (this.isDisposed) return undefined;
     if (isCtrlO(data)) {
+      console.error("[pi-workflow] handleTerminalInput: Ctrl+O detected, toggling expanded");
       this.state.expanded = !this.state.expanded;
       this.requestRenderIfChanged();
       return { consume: true };
@@ -104,7 +105,9 @@ export class WorkflowLiveWidget {
 
     // Subscribe to Ctrl+O terminal input
     if (ui.onTerminalInput) {
+      console.error("[pi-workflow] widget.attach: registering terminal input handler");
       this.unsubscribeInput = ui.onTerminalInput((data) => this.handleTerminalInput(data));
+      console.error(`[pi-workflow] widget.attach: handler registered, unsubscribe is ${typeof this.unsubscribeInput}`);
     }
 
     // Start 500ms spinner ticker

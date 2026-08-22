@@ -13,7 +13,7 @@
 > repository layout, test inventory, and live output UX. §52 (audit findings and
 > remediation) is the historical record and is preserved as-is. The dated §46 acceptance
 > record (69/69 tests, 2026-08-21) remains a point-in-time record; the current suite is
-> 103 tests (`npm test`).
+> 130 tests (`npm test`).
 
 ---
 
@@ -619,6 +619,7 @@ state.changed                     (from / to / node / reason, written by the sta
 gate.test                         (test-gate status and reason)
 mode.resolved                      (auto-routed mode finalization, Finding 6)
 planner.fork_unavailable           (Finding 1 fork degradation)
+spec.loaded                        (spec-driven entry /work spec: spec path + size; plan synthesized deterministically)
 workflow.preflight_failed          (resume path that cannot preflight)
 workflow.failed
 ```
@@ -1269,7 +1270,7 @@ Argument parsing (implemented in `src/commands/parser.ts`):
 ```text
 /work                      → help
 /work help                 → help
-plan / auto                → accept --quick|--normal|--strict anywhere in the arguments
+plan / spec / auto         → accept --quick|--normal|--strict anywhere in the arguments
 implement/review/fix/status/resume/abort → optional runId (defaults to the active run)
 first arg not a recognized subcommand → the whole line is treated as /work auto <task>
 ```
@@ -1292,6 +1293,31 @@ display plan summary
 MUST NOT modify code.
 
 The mode is the explicit flag or `defaultMode`. Complexity routing (§25) applies to `/work auto` only; `/work plan` never re-routes the mode from the plan's complexity.
+
+---
+
+## `/work spec <spec-path>`
+
+The spec-driven entry for the simplest flow (execute → review → fix): the
+requirement is already written down, so no scout or planner agent runs at all.
+
+Behavior:
+
+```text
+read the spec file (relative to cwd or absolute; missing/empty → usage error, no run created)
+preflight worker + reviewer only (scout/planner agents need not be configured)
+create run; request = one-line preamble + the spec content verbatim between
+    --- SPECIFICATION BEGIN --- / --- SPECIFICATION END --- markers
+synthesize PlanResult deterministically (synthesizeSpecPlan; no LLM call)
+persist plan.json + request.md; emit spec.loaded
+state = plan_ready via the created → plan_ready transition
+run the shared /work auto tail: implement → test gate → fresh review ↔ fix loop
+```
+
+The spec embedded in the run request is the authoritative plan: the worker,
+every fresh reviewer, and the fixer each receive it through the
+"Original Requirement" prompt section. Review budgets, reviewer freshness,
+fix-loop bounds, persistence, and resume semantics are identical to `/work auto`.
 
 ---
 
@@ -1681,7 +1707,9 @@ Use `pi-subagents/preflight` rather than guessing available tools/models.
 Implementation details (v0.1, `src/agents/preflight.ts`):
 
 - Quick mode requires only `planner`, `worker`, `reviewer` (scout is skipped in quick);
-  normal/strict additionally require `scout`.
+  normal/strict additionally require `scout`. The spec-driven flow (`/work spec`,
+  `validateWorkflowPreflight`'s `requiredRoles` override) requires only
+  `worker` and `reviewer` because it launches no scout or planner node.
 - Each role has a small candidate fallback list (e.g. `scout → researcher`,
   `planner → researcher / scout / oracle`); a candidate that fails its launch-contract
   check triggers the next candidate. A THROWN preflight failure is a genuine failure and
@@ -1839,6 +1867,7 @@ pi-workflow/
     ├── gates.test.ts
     ├── context-policy.test.ts
     ├── workflow-auto.test.ts
+    ├── spec-flow.test.ts
     ├── recovery.test.ts
     ├── lock.test.ts
     ├── commands.test.ts
@@ -1847,6 +1876,7 @@ pi-workflow/
     ├── ui-port.test.ts
     ├── widget.test.ts
     ├── widget-renderer.test.ts
+    ├── node-execution.test.ts
     └── fake-executor.ts
 ```
 
@@ -1854,9 +1884,11 @@ This tree reflects the implemented v0.1 layout (synchronized 2026-08-21). Newer 
 `commands/ui-port.ts` (typed UI port), `commands/widget.ts` + `commands/widget-renderer.ts`
 (live aboveEditor progress widget, see `docs/spec-workflow-output-widget.md`),
 `policies/fork.ts` / `policies/intercom.ts` / `policies/refusal.ts` (audit Findings
-1/13/14), `prompts/common.ts` (autonomy constraint), and the matching test files
+1/13/14), `prompts/common.ts` (autonomy constraint), `engine/node-execution.ts`
+(shared node execution/retry loop), and the matching test files
 (`audit-remediation.test.ts` covers the §52 findings; `progress.test.ts`,
-`ui-port.test.ts`, `widget.test.ts`, `widget-renderer.test.ts` cover the live progress UI).
+`ui-port.test.ts`, `widget.test.ts`, `widget-renderer.test.ts` cover the live progress UI;
+`spec-flow.test.ts` covers the `/work spec` spec-driven flow).
 
 Do not create additional abstraction layers unless needed.
 

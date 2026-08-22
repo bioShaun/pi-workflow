@@ -130,12 +130,13 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
 
   pi.registerCommand("work", {
     description:
-      "Deterministic workflow orchestrator: /work [auto|plan|implement|review|fix|status|resume|abort|list|help]",
+      "Deterministic workflow orchestrator: /work [auto|plan|spec|implement|review|fix|status|resume|abort|list|help]",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const sub = (prefix ?? "").split(" ")[0].toLowerCase();
       const candidates = [
         "auto ",
         "plan ",
+        "spec ",
         "implement",
         "review",
         "fix",
@@ -227,6 +228,23 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
               ui.notify(renderRunError(run), "error");
             } else {
               ui.notify(`Fix round completed for run ${run.id}. Ready for /work review.`, "info");
+            }
+            break;
+          }
+
+          case "spec": {
+            if (!parsed.task) {
+              ui.notify("Usage: /work spec <path-to-spec> [--quick|--normal|--strict]", "error");
+              return;
+            }
+            ui.notify(`Starting spec-driven workflow from "${parsed.task}" (implement → review → fix)...`, "info");
+            const run = await engine.startSpec(parsed.task, { mode: parsed.mode });
+            if (run.state === "completed") {
+              ui.notify(renderCompleted(run), "info");
+            } else if (run.state === "failed") {
+              ui.notify(`Workflow failed [${run.error?.code}]: ${run.error?.message}`, "error");
+            } else if (run.state === "aborted") {
+              ui.notify(renderAborted(run), "warning");
             }
             break;
           }

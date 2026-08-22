@@ -3,6 +3,7 @@ import type { WorkflowMode } from "../contracts/workflow.ts";
 export type WorkSubcommand =
   | "help"
   | "plan"
+  | "spec"
   | "implement"
   | "review"
   | "fix"
@@ -51,6 +52,14 @@ export function parseWorkArgs(argsStr: string): ParsedWorkCommand {
     case "plan":
       return {
         subcommand: "plan",
+        task: remainder,
+        mode,
+        rawArgs: trimmed,
+      };
+    case "spec":
+      // task carries the spec file path (relative to the project root or absolute)
+      return {
+        subcommand: "spec",
         task: remainder,
         mode,
         rawArgs: trimmed,

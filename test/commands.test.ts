@@ -73,6 +73,18 @@ describe("CLI Parser and UX Renderer", () => {
       assert.equal(p3.mode, "quick");
     });
 
+    it("parses spec with a path and modes", () => {
+      const s1 = parseWorkArgs("spec .scratch/widget/spec.md");
+      assert.equal(s1.subcommand, "spec");
+      assert.equal(s1.task, ".scratch/widget/spec.md");
+      assert.equal(s1.mode, undefined);
+
+      const s2 = parseWorkArgs("spec docs/feature.md --strict");
+      assert.equal(s2.subcommand, "spec");
+      assert.equal(s2.task, "docs/feature.md");
+      assert.equal(s2.mode, "strict");
+    });
+
     it("parses auto, implement, review, fix, status, resume, abort", () => {
       assert.equal(parseWorkArgs("implement").subcommand, "implement");
       assert.equal(parseWorkArgs("review").subcommand, "review");
@@ -94,6 +106,7 @@ describe("CLI Parser and UX Renderer", () => {
       const help = renderHelp();
       assert.match(help, /\/work auto/);
       assert.match(help, /\/work plan/);
+      assert.match(help, /\/work spec/);
       assert.match(help, /\/work review/);
       assert.match(help, /\/work list/);
     });
@@ -413,7 +426,7 @@ describe("CLI Parser and UX Renderer", () => {
 
       const completionsEmpty = registered.getArgumentCompletions("");
       assert.ok(completionsEmpty);
-      assert.equal(completionsEmpty.length, 10);
+      assert.equal(completionsEmpty.length, 11);
       assert.ok(!completionsEmpty.some((item) => item.value === ""));
 
       const completionsA = registered.getArgumentCompletions("a");
@@ -425,6 +438,11 @@ describe("CLI Parser and UX Renderer", () => {
       const completionsP = registered.getArgumentCompletions("p");
       assert.deepEqual(completionsP, [
         { value: "plan ", label: "plan" },
+      ]);
+
+      const completionsS = registered.getArgumentCompletions("sp");
+      assert.deepEqual(completionsS, [
+        { value: "spec ", label: "spec" },
       ]);
 
       const completionsZ = registered.getArgumentCompletions("xyz");
@@ -439,7 +457,7 @@ describe("CLI Parser and UX Renderer", () => {
         },
       } as any;
       registerWorkCommand(pi);
-      for (const sub of ["auto", "plan", "implement", "review", "fix", "status", "resume", "abort", "list", "help"]) {
+      for (const sub of ["auto", "plan", "spec", "implement", "review", "fix", "status", "resume", "abort", "list", "help"]) {
         assert.ok(description.includes(sub), `description should mention /work ${sub}`);
       }
     });

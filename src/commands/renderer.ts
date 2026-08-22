@@ -8,6 +8,7 @@ export function renderHelp(): string {
     "Usage:",
     "  /work auto <task> [--quick|--normal|--strict]  Run automated workflow end-to-end",
     "  /work plan <task> [--quick|--normal|--strict]  Generate and persist implementation plan",
+    "  /work spec <spec-path> [--quick|--normal|--strict]  Spec-driven flow: implement → review → fix (no planner)",
     "  /work implement [runId]                        Execute worker for approved plan",
     "  /work review [runId]                           Launch fresh reviewer(s)",
     "  /work fix [runId]                              Execute fix worker for review findings",

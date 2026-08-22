@@ -216,6 +216,38 @@ describe("Audit Findings & Remediation (§52)", () => {
       // fork fail (degrade, no budget) + fresh fail (budget 1) + fresh retry fail
       assert.equal(planCalls, 3);
     });
+
+    it("applies backoff only to genuine agent failures, not the fork degradation", async () => {
+      const forkError =
+        "Failed to create forked subagent session: Parent session file does not exist: " +
+        "/sessions/x.jsonl. Pi has not persisted enough history to fork yet.";
+      let planCalls = 0;
+      const sleeps: number[] = [];
+      const fake = new FakeAgentExecutor();
+      fake.setHandler("plan", (req) => {
+        planCalls++;
+        if (req.context === "fork") return { status: "failed", error: forkError };
+        if (planCalls === 2) return { status: "failed", error: "transient blip" };
+        return { status: "completed", result: makePlan() };
+      });
+      const engine = new WorkflowEngine({
+        cwd: tmpDir,
+        executor: fake,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      });
+
+      const run = await engine.startPlan("some task", { mode: "quick" });
+
+      assert.equal(run.state, "plan_ready");
+      assert.equal(planCalls, 3, "fork degrade + degraded fresh failure (retried) + success");
+      assert.deepEqual(
+        sleeps,
+        [1000],
+        "only the genuine transient failure backs off (Finding 9); the fork degradation does not"
+      );
+    });
   });
 
   describe("Finding 3 — test gate routing", () => {
@@ -859,6 +891,47 @@ describe("Audit Findings & Remediation (§52)", () => {
       assert.equal(run.error?.nodeId, "implement");
       assert.match(run.error?.message ?? "", /declined to modify the repository/i);
       assert.equal(workerCalls, 1, "no verbatim retry on a deterministic refusal");
+      assert.equal(await engine.getActiveRun(), null);
+    });
+
+    it("fix worker refusal fails fast after exactly one attempt (Finding 14)", async () => {
+      const refusal =
+        "Subagent completed without making edits for an implementation task. " +
+        "It appears to have returned planning or scratchpad output instead of applying changes.";
+      let fixCalls = 0;
+      const fake = new FakeAgentExecutor({
+        review: [
+          {
+            verdict: "REQUEST_CHANGES",
+            summary: "Missing null guard",
+            findings: [
+              {
+                id: "f-1",
+                severity: "major",
+                category: "correctness",
+                description: "Missing null guard on input",
+                evidence: "line 1",
+                file: "src/main.ts",
+              },
+            ],
+            testAssessment: { sufficient: true, explanation: "" },
+            confidence: 0.8,
+          },
+        ],
+      });
+      fake.setHandler("fix-1", () => {
+        fixCalls++;
+        return { status: "failed", error: refusal };
+      });
+      const engine = new WorkflowEngine({ cwd: tmpDir, executor: fake, sleep: noSleep });
+
+      const run = await engine.startAuto("contradictory task", { mode: "quick" });
+
+      assert.equal(run.state, "failed");
+      assert.equal(run.error?.code, "agent_execution_failed");
+      assert.equal(run.error?.nodeId, "fix-1");
+      assert.match(run.error?.message ?? "", /declined to modify the repository/i);
+      assert.equal(fixCalls, 1, "no verbatim retry on a deterministic refusal");
       assert.equal(await engine.getActiveRun(), null);
     });
 

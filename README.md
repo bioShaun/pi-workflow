@@ -63,6 +63,7 @@ Every review attempt is a new isolated agent invocation (`context: "fresh"`). Re
 |---|---|
 | `/work auto <task> [--quick\|--normal\|--strict]` | Run complete automated workflow end-to-end |
 | `/work plan <task> [--quick\|--normal\|--strict]` | Produce and validate structured implementation plan |
+| `/work spec <spec-path> [--quick\|--normal\|--strict]` | Spec-driven flow: implement → review → fix directly from a prepared spec document (no scout/planner agents) |
 | `/work implement [runId]` | Execute implementation worker for approved plan |
 | `/work review [runId]` | Launch fresh independent reviewer(s) |
 | `/work fix [runId]` | Execute fix worker for review findings |
@@ -73,6 +74,19 @@ Every review attempt is a new isolated agent invocation (`context: "fresh"`). Re
 | `/work help` | Show usage information |
 
 Bare `/work` shows help. A first argument that is not a recognized subcommand is treated as `/work auto <task>` (the whole line becomes the task).
+
+### Spec-Driven Flow (`/work spec`)
+
+For the common case where the requirement is already written down (for example `.scratch/<feature>/spec.md`), `/work spec <path>` skips the scout and planner agents entirely:
+
+```text
+spec document ──(deterministic plan synthesis, no LLM)──► implement → test gate → fresh review ↔ fix loop → completed
+```
+
+- The spec file is read from disk (relative to the project root or absolute) and embedded verbatim in the run request, so the worker, every fresh reviewer, and the fixer all see the same authoritative requirement.
+- The `PlanResult` is synthesized deterministically by the engine (`synthesizeSpecPlan`); it passes the plan gate by construction and is persisted as `plan.json` like any other run.
+- Preflight requires only the `worker` and `reviewer` agents — scout/planner need not be configured.
+- Review budgets, fresh-reviewer isolation, the fix loop, persistence, and resume behave exactly like `/work auto` (state machine entry: `created → plan_ready`).
 
 ---
 
@@ -106,6 +120,7 @@ pi-workflow/
 │   │   ├── engine.ts
 │   │   ├── state-machine.ts
 │   │   ├── transitions.ts
+│   │   ├── node-execution.ts
 │   │   └── errors.ts
 │   ├── agents/
 │   │   ├── executor.ts
@@ -148,6 +163,7 @@ pi-workflow/
     ├── gates.test.ts
     ├── context-policy.test.ts
     ├── workflow-auto.test.ts
+    ├── spec-flow.test.ts
     ├── recovery.test.ts
     ├── lock.test.ts
     ├── commands.test.ts
@@ -156,6 +172,7 @@ pi-workflow/
     ├── ui-port.test.ts
     ├── widget.test.ts
     ├── widget-renderer.test.ts
+    ├── node-execution.test.ts
     └── fake-executor.ts
 ```
 

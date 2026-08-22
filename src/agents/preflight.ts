@@ -81,10 +81,15 @@ export async function validateWorkflowPreflight(
   config: WorkflowConfig,
   cwd: string,
   mode: WorkflowMode,
-  importPreflightModule: PreflightModuleImport = DEFAULT_PREFLIGHT_IMPORT
+  importPreflightModule: PreflightModuleImport = DEFAULT_PREFLIGHT_IMPORT,
+  /**
+   * Overrides the mode-derived role set. The spec-driven flow (/work spec)
+   * runs no scout or planner node, so it passes ["worker", "reviewer"].
+   */
+  requiredRoles?: WorkflowRole[]
 ): Promise<PreflightCheckResult> {
-  const requiredRoles: WorkflowRole[] =
-    mode === "quick" ? ["planner", "worker", "reviewer"] : ["scout", "planner", "worker", "reviewer"];
+  const effectiveRoles: WorkflowRole[] =
+    requiredRoles ?? (mode === "quick" ? ["planner", "worker", "reviewer"] : ["scout", "planner", "worker", "reviewer"]);
 
   const resolved: Record<WorkflowRole, string> = { ...config.agents };
   const diagnostics: PreflightDiagnostic[] = [];
@@ -133,7 +138,7 @@ export async function validateWorkflowPreflight(
     };
   }
 
-  for (const role of requiredRoles) {
+  for (const role of effectiveRoles) {
     const configuredAgent = config.agents[role];
     if (!configuredAgent || !configuredAgent.trim()) {
       diagnostics.push({
