@@ -95,6 +95,7 @@ describe("CLI Parser and UX Renderer", () => {
       assert.match(help, /\/work auto/);
       assert.match(help, /\/work plan/);
       assert.match(help, /\/work review/);
+      assert.match(help, /\/work list/);
     });
 
     it("renders status output properly", () => {
@@ -428,6 +429,19 @@ describe("CLI Parser and UX Renderer", () => {
 
       const completionsZ = registered.getArgumentCompletions("xyz");
       assert.equal(completionsZ, null);
+    });
+
+    it("advertises the full command surface in the registered description, including /work list", () => {
+      let description = "";
+      const pi = {
+        registerCommand: (name: string, cfg: { description: string }) => {
+          description = cfg.description;
+        },
+      } as any;
+      registerWorkCommand(pi);
+      for (const sub of ["auto", "plan", "implement", "review", "fix", "status", "resume", "abort", "list", "help"]) {
+        assert.ok(description.includes(sub), `description should mention /work ${sub}`);
+      }
     });
   });
 });

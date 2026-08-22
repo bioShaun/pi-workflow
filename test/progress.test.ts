@@ -289,6 +289,7 @@ describe("WorkflowEngine progress lifecycle", () => {
         agent: request.agent,
         currentTool: "read",
         currentToolArgs: "package.json",
+        recentOutput: "stream line",
         durationMs: 500,
         tokens: 1200,
       });
@@ -323,6 +324,7 @@ describe("WorkflowEngine progress lifecycle", () => {
 
     assert.equal(update.details?.currentTool, "read");
     assert.equal(update.details?.currentToolArgs, "package.json");
+    assert.equal(update.details?.recentOutput, "stream line");
     assert.equal(update.durationMs, 500);
     assert.equal(update.tokens, 1200);
 
@@ -429,6 +431,7 @@ describe("WorkflowEngine progress lifecycle", () => {
     for (const update of updates) {
       assert.equal(update.details?.currentTool, "read");
       assert.equal(update.details?.currentToolArgs, "package.json");
+      assert.equal(update.details?.recentOutput, "stream line");
       assert.equal(update.durationMs, 500);
       assert.equal(update.tokens, 1200);
     }

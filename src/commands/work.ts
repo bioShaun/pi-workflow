@@ -130,7 +130,7 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
 
   pi.registerCommand("work", {
     description:
-      "Deterministic workflow orchestrator: /work [auto|plan|implement|review|fix|status|resume|abort|help]",
+      "Deterministic workflow orchestrator: /work [auto|plan|implement|review|fix|status|resume|abort|list|help]",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const sub = (prefix ?? "").split(" ")[0].toLowerCase();
       const candidates = [
@@ -155,6 +155,8 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
       const ui = createWorkflowUI(ctx);
       const widgetHolder: { widget?: WorkflowLiveWidget } = {};
       const engine = getEngine(ui, widgetHolder, ctx.cwd);
+
+      ui.notify(`⏳ /work ${parsed.subcommand} received, processing...`, "info");
 
       try {
         switch (parsed.subcommand) {

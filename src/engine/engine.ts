@@ -185,6 +185,7 @@ export class WorkflowEngine {
             code: wfError.code,
             message: wfError.message,
             nodeId: node,
+            ...(wfError.details ? { details: wfError.details } : {}),
           },
         });
       } catch {
@@ -448,7 +449,11 @@ export class WorkflowEngine {
             action: "Exploring repository structure...",
             durationMs: up.durationMs ?? (Date.now() - startTime),
             tokens: up.tokens,
-            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+            details: {
+              currentTool: up.currentTool,
+              currentToolArgs: up.currentToolArgs,
+              recentOutput: up.recentOutput,
+            },
           });
         },
       });
@@ -576,7 +581,11 @@ export class WorkflowEngine {
             action: "Formulating implementation plan...",
             durationMs: up.durationMs ?? (Date.now() - startTime),
             tokens: up.tokens,
-            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+            details: {
+              currentTool: up.currentTool,
+              currentToolArgs: up.currentToolArgs,
+              recentOutput: up.recentOutput,
+            },
           });
         },
       });
@@ -731,7 +740,11 @@ export class WorkflowEngine {
             action: "Executing implementation changes...",
             durationMs: up.durationMs ?? (Date.now() - startTime),
             tokens: up.tokens,
-            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+            details: {
+              currentTool: up.currentTool,
+              currentToolArgs: up.currentToolArgs,
+              recentOutput: up.recentOutput,
+            },
           });
         },
       });
@@ -939,7 +952,11 @@ export class WorkflowEngine {
             action: `Reviewing diff (${reviewerId})...`,
             durationMs: up.durationMs ?? (Date.now() - startTime),
             tokens: up.tokens,
-            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+            details: {
+              currentTool: up.currentTool,
+              currentToolArgs: up.currentToolArgs,
+              recentOutput: up.recentOutput,
+            },
           });
         },
       });
@@ -1233,7 +1250,11 @@ export class WorkflowEngine {
             action: `Fixing review findings (round ${fixRound})...`,
             durationMs: up.durationMs ?? (Date.now() - startTime),
             tokens: up.tokens,
-            details: { currentTool: up.currentTool, currentToolArgs: up.currentToolArgs },
+            details: {
+              currentTool: up.currentTool,
+              currentToolArgs: up.currentToolArgs,
+              recentOutput: up.recentOutput,
+            },
           });
         },
       });

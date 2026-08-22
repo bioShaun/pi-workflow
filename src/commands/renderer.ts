@@ -14,6 +14,7 @@ export function renderHelp(): string {
     "  /work status [runId]                           Inspect active or specified workflow status",
     "  /work resume [runId]                           Resume workflow from last persisted checkpoint",
     "  /work abort [runId]                            Abort active workflow (preserves changes)",
+    "  /work list                                     List all workflow runs",
     "  /work help                                     Show this help message",
   ].join("\n");
 }

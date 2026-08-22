@@ -136,6 +136,28 @@ describe("Audit Findings & Remediation (§52)", () => {
       assert.equal(loaded.state, "failed");
       assert.equal(await engine.getActiveRun(), null);
     });
+
+    it("persists WorkflowError diagnostic details in the failure record", async () => {
+      const fake = new FakeAgentExecutor();
+      fake.setHandler("plan", () => {
+        throw new WorkflowError("agent_execution_failed", "planner exploded", {
+          nodeId: "plan",
+          details: { hint: "check config", attempts: 3 },
+        });
+      });
+      const engine = new WorkflowEngine({ cwd: tmpDir, executor: fake, sleep: noSleep });
+
+      const run = await engine.startPlan("some task", { mode: "quick" });
+
+      assert.equal(run.state, "failed");
+      assert.deepEqual(run.error?.details, { hint: "check config", attempts: 3 });
+
+      // The diagnostic blob must survive the round trip through state.json.
+      const loaded = await loadWorkflowRun(baseDirOf(tmpDir), run.id);
+      assert.equal(loaded.state, "failed");
+      assert.equal(loaded.error?.code, "agent_execution_failed");
+      assert.deepEqual(loaded.error?.details, { hint: "check config", attempts: 3 });
+    });
   });
 
   describe("Finding 1 — planner fork degradation", () => {

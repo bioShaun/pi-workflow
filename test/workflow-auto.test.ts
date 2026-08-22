@@ -180,5 +180,62 @@ describe("Automated Workflow (/work auto)", () => {
       .filter((r) => r.nodeId.startsWith("review"))
       .map((r) => r.nodeId);
     assert.deepEqual(nodeIds, ["review-1-a", "review-1-b", "review-2-a", "review-2-b", "review-2-final"]);
+    // Conditional strict-final contract: a round in which reviewer A or B
+    // requests changes never launches `review-N-final` — the round goes
+    // straight to fixing (regression guard for the conditional in
+    // src/engine/engine.ts, `if (run.mode === "strict" && !hasRejections)`).
+    assert.ok(!nodeIds.includes("review-1-final"));
+  });
+
+  it("does not launch review-N-final when strict reviewer B requests changes", async () => {
+    // Round 1: Reviewer A passes (index 0), Reviewer B rejects (index 1).
+    // Round 2 (after the fix): A, B, and final all default to PASS (the
+    // fake clamps the review index, so index 2+ returns the final entry).
+    const fakeExecutor = new FakeAgentExecutor({
+      review: [
+        {
+          verdict: "PASS",
+          summary: "Round 1 Reviewer A passes",
+          findings: [],
+          testAssessment: { sufficient: true, explanation: "" },
+          confidence: 0.95,
+        },
+        {
+          verdict: "REQUEST_CHANGES",
+          summary: "Test gaps in round 1",
+          findings: [
+            {
+              id: "f1",
+              severity: "major",
+              category: "tests",
+              description: "No tests for the new code path",
+              evidence: "src/main.ts",
+            },
+          ],
+          testAssessment: { sufficient: false, explanation: "Insufficient coverage" },
+          confidence: 0.9,
+        },
+        {
+          verdict: "PASS",
+          summary: "Round 2 passes",
+          findings: [],
+          testAssessment: { sufficient: true, explanation: "" },
+          confidence: 0.95,
+        },
+      ],
+    });
+    const engine = new WorkflowEngine({
+      cwd: tmpDir,
+      executor: fakeExecutor,
+    });
+
+    const run = await engine.startAuto("Architectural change", { mode: "strict" });
+
+    assert.equal(run.state, "completed");
+    const nodeIds = fakeExecutor.requests
+      .filter((r) => r.nodeId.startsWith("review"))
+      .map((r) => r.nodeId);
+    assert.deepEqual(nodeIds, ["review-1-a", "review-1-b", "review-2-a", "review-2-b", "review-2-final"]);
+    assert.ok(!nodeIds.includes("review-1-final"));
   });
 });
