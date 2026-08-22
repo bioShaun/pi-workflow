@@ -1,5 +1,7 @@
 # pi-workflow
 
+📖 **Language:** English | [中文](README.zh-CN.md)
+
 Deterministic coding-workflow orchestrator for [Pi Coding Agent](https://github.com/nicobailon/pi-subagents).
 
 Coordinates isolated subagents through a persistent, inspectable, and resumable state machine.
