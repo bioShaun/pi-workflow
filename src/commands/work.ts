@@ -14,27 +14,63 @@ import {
 import { WorkflowEngine } from "../engine/engine.ts";
 import type { WorkflowProgressEvent } from "../engine/engine.ts";
 import { PiSubagentsExecutor } from "../agents/pi-subagents-executor.ts";
+import { createWorkflowUI, type WorkflowUI } from "./ui-port.ts";
+import { WorkflowLiveWidget, WIDGET_KEY } from "./widget.ts";
 
 export type NotifyFn = (msg: string, type: "info" | "warning" | "error") => void;
 
 /**
- * Maps workflow progress events onto the command-layer UI: live breadcrumbs
- * via setWorkingMessage and compact trace lines via notify. Exported so the
- * status mapping (review verdicts, fix test outcomes) is unit-testable.
+ * Maps workflow progress events onto the command-layer UI: live aboveEditor widget,
+ * fallback breadcrumbs via setWorking, and compact trace lines via notify.
  */
 export function createProgressNotifier(
-  notify: NotifyFn,
-  setWorking: (msg?: string) => void
+  ui: WorkflowUI,
+  widgetHolder: { widget?: WorkflowLiveWidget }
 ): (event: WorkflowProgressEvent) => void {
   return (event: WorkflowProgressEvent) => {
     if (event.type === "node_start") {
-      setWorking(formatWorkingBreadcrumb(event.agent ?? event.nodeId, event.action ?? "Working..."));
+      if (!widgetHolder.widget) {
+        widgetHolder.widget = new WorkflowLiveWidget({
+          runId: event.run.id,
+          mode: event.run.mode,
+          node: event.nodeId,
+          agent: event.agent ?? event.nodeId,
+          action: event.action ?? "Working...",
+          tokens: event.tokens ?? 0,
+          expanded: false,
+        });
+        widgetHolder.widget.attach(ui);
+      } else {
+        widgetHolder.widget.update({
+          node: event.nodeId,
+          agent: event.agent ?? event.nodeId,
+          action: event.action ?? "Working...",
+          tokens: event.tokens ?? 0,
+        });
+      }
+      ui.setWorking(formatWorkingBreadcrumb(event.agent ?? event.nodeId, event.action ?? "Working..."));
     } else if (event.type === "node_update") {
-      setWorking(
+      const toolName = event.details?.currentTool as string | undefined;
+      const toolArgs = event.details?.currentToolArgs as string | undefined;
+      const recentOut = event.details?.recentOutput as string | undefined;
+
+      if (widgetHolder.widget) {
+        widgetHolder.widget.update({
+          node: event.nodeId,
+          agent: event.agent ?? event.nodeId,
+          action: event.action ?? "Working...",
+          durationMs: event.durationMs,
+          tokens: event.tokens ?? widgetHolder.widget.state.tokens,
+          tool: toolName ? { name: toolName, args: toolArgs } : undefined,
+          stdout: recentOut,
+        });
+      }
+
+      ui.setWorking(
         formatWorkingBreadcrumb(
           event.agent ?? event.nodeId,
           event.action ?? "Working...",
-          event.details?.currentTool as string | undefined,
+          toolName,
           event.durationMs,
           event.tokens
         )
@@ -55,8 +91,6 @@ export function createProgressNotifier(
           }
         }
       } else if (event.nodeId.startsWith("fix")) {
-        // The fix node itself completed, but the tests the fix worker ran
-        // may not all pass: surface that instead of a success checkmark.
         const totalTests = (event.details?.totalTests as number | undefined) ?? 0;
         const passedTests = (event.details?.passedTests as number | undefined) ?? 0;
         const failedTests = (event.details?.failedTests as number | undefined) ?? 0;
@@ -69,7 +103,7 @@ export function createProgressNotifier(
         }
       }
 
-      notify(
+      ui.notify(
         renderTraceLine({
           status: traceStatus,
           agent: event.agent ?? event.nodeId,
@@ -85,25 +119,12 @@ export function createProgressNotifier(
 }
 
 export function registerWorkCommand(pi: ExtensionAPI): void {
-  const getEngine = (ctx: ExtensionCommandContext) => {
+  const getEngine = (ui: WorkflowUI, widgetHolder: { widget?: WorkflowLiveWidget }, cwd: string) => {
     const executor = new PiSubagentsExecutor(pi as any);
-
-    const notify = (msg: string, type: "info" | "warning" | "error" = "info") => {
-      if ((ctx as any).ui?.notify) {
-        (ctx as any).ui.notify(msg, type);
-      }
-    };
-
-    const setWorking = (msg?: string) => {
-      if ((ctx as any).ui?.setWorkingMessage) {
-        (ctx as any).ui.setWorkingMessage(msg);
-      }
-    };
-
     return new WorkflowEngine({
-      cwd: ctx.cwd,
+      cwd,
       executor,
-      onProgress: createProgressNotifier(notify, setWorking),
+      onProgress: createProgressNotifier(ui, widgetHolder),
     });
   };
 
@@ -131,145 +152,142 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const parsed = parseWorkArgs(args);
-      const engine = getEngine(ctx);
-
-      const notify = (msg: string, type: "info" | "warning" | "error" = "info") => {
-        if ((ctx as any).ui?.notify) {
-          (ctx as any).ui.notify(msg, type);
-        }
-      };
+      const ui = createWorkflowUI(ctx);
+      const widgetHolder: { widget?: WorkflowLiveWidget } = {};
+      const engine = getEngine(ui, widgetHolder, ctx.cwd);
 
       try {
         switch (parsed.subcommand) {
           case "help": {
-            notify(renderHelp(), "info");
+            ui.notify(renderHelp(), "info");
             break;
           }
 
           case "plan": {
             if (!parsed.task) {
-              notify("Usage: /work plan <task description>", "error");
+              ui.notify("Usage: /work plan <task description>", "error");
               return;
             }
-            notify(`Planning workflow: "${parsed.task}"...`, "info");
+            ui.notify(`Planning workflow: "${parsed.task}"...`, "info");
             const run = await engine.startPlan(parsed.task, { mode: parsed.mode });
             if (run.state === "failed") {
-              notify(renderRunError(run), "error");
+              ui.notify(renderRunError(run), "error");
             } else {
-              notify(renderPlanSummary(run.plan!, run), "info");
+              ui.notify(renderPlanSummary(run.plan!, run), "info");
             }
             break;
           }
 
           case "implement": {
-            notify("Executing implementation worker...", "info");
+            ui.notify("Executing implementation worker...", "info");
             const run = await engine.startImplement(parsed.runId);
             if (run.state === "failed") {
-              notify(renderRunError(run), "error");
+              ui.notify(renderRunError(run), "error");
             } else if (run.state === "fixing") {
-              // Audit Finding 3: the test gate routed the run to fixing.
-              notify(
+              ui.notify(
                 `Implementation finished but required tests failed (run ${run.id}). Run /work fix to address them.`,
                 "warning"
               );
             } else {
-              notify(`Implementation completed for run ${run.id}. Ready for /work review.`, "info");
+              ui.notify(`Implementation completed for run ${run.id}. Ready for /work review.`, "info");
             }
             break;
           }
 
           case "review": {
-            notify("Launching independent reviewer (fresh context)...", "info");
+            ui.notify("Launching independent reviewer (fresh context)...", "info");
             const run = await engine.startReview(parsed.runId);
             if (run.state === "completed") {
-              notify(renderCompleted(run), "info");
+              ui.notify(renderCompleted(run), "info");
             } else if (run.state === "fixing") {
               const latestReview = run.reviews[run.reviews.length - 1];
               if (latestReview?.verdict === "REQUEST_CHANGES") {
-                notify(
+                ui.notify(
                   `Review requested changes (${latestReview.findings.length} finding(s)). Run /work fix to address them.`,
                   "warning"
                 );
               } else {
-                notify(
+                ui.notify(
                   `Reviewers passed but the completion gate is not satisfied (run ${run.id}). Run /work fix.`,
                   "warning"
                 );
               }
             } else if (run.state === "failed") {
-              notify(renderRunError(run), "error");
+              ui.notify(renderRunError(run), "error");
             }
             break;
           }
 
           case "fix": {
-            notify("Executing fix worker...", "info");
+            ui.notify("Executing fix worker...", "info");
             const run = await engine.startFix(parsed.runId);
             if (run.state === "failed") {
-              notify(renderRunError(run), "error");
+              ui.notify(renderRunError(run), "error");
             } else {
-              notify(`Fix round completed for run ${run.id}. Ready for /work review.`, "info");
+              ui.notify(`Fix round completed for run ${run.id}. Ready for /work review.`, "info");
             }
             break;
           }
 
           case "auto": {
             if (!parsed.task) {
-              notify("Usage: /work auto <task description> [--quick|--normal|--strict]", "error");
+              ui.notify("Usage: /work auto <task description> [--quick|--normal|--strict]", "error");
               return;
             }
-            notify(`Starting automated workflow: "${parsed.task}"...`, "info");
+            ui.notify(`Starting automated workflow: "${parsed.task}"...`, "info");
             const run = await engine.startAuto(parsed.task, { mode: parsed.mode });
             if (run.state === "completed") {
-              notify(renderCompleted(run), "info");
+              ui.notify(renderCompleted(run), "info");
             } else if (run.state === "failed") {
-              notify(`Workflow failed [${run.error?.code}]: ${run.error?.message}`, "error");
+              ui.notify(`Workflow failed [${run.error?.code}]: ${run.error?.message}`, "error");
             } else if (run.state === "aborted") {
-              notify(renderAborted(run), "warning");
+              ui.notify(renderAborted(run), "warning");
             }
             break;
           }
 
           case "status": {
             const run = await engine.status(parsed.runId);
-            notify(renderStatus(run), "info");
+            ui.notify(renderStatus(run), "info");
             break;
           }
 
           case "resume": {
-            notify("Resuming workflow from last checkpoint...", "info");
+            ui.notify("Resuming workflow from last checkpoint...", "info");
             const run = await engine.resume(parsed.runId);
             if (run.state === "completed") {
-              notify(renderCompleted(run), "info");
+              ui.notify(renderCompleted(run), "info");
             } else {
-              notify(renderStatus(run), "info");
+              ui.notify(renderStatus(run), "info");
             }
             break;
           }
 
           case "abort": {
             const run = await engine.abort(parsed.runId);
-            notify(renderAborted(run), "warning");
+            ui.notify(renderAborted(run), "warning");
             break;
           }
 
           case "list": {
             const runs = await engine.listRuns();
             if (runs.length === 0) {
-              notify("No workflow runs found.", "info");
+              ui.notify("No workflow runs found.", "info");
             } else {
-              notify(`Workflow runs:\n${runs.map((r) => `  - ${r}`).join("\n")}`, "info");
+              ui.notify(`Workflow runs:\n${runs.map((r) => `  - ${r}`).join("\n")}`, "info");
             }
             break;
           }
         }
       } catch (err: any) {
-        notify(`Workflow error: ${err?.message ?? String(err)}`, "error");
+        ui.notify(`Workflow error: ${err?.message ?? String(err)}`, "error");
       } finally {
-        if ((ctx as any).ui?.setWorkingMessage) {
-          (ctx as any).ui.setWorkingMessage();
+        if (widgetHolder.widget) {
+          widgetHolder.widget.dispose(ui);
         }
+        ui.setWorking();
       }
     },
   });
 }
+

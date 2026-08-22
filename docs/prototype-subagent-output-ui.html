@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pi-workflow 输出界面实时交互原型 (pi-subagents 架构)</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --border-focus: #58a6ff;
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+      --text-bright: #f0f6fc;
+      --accent: #58a6ff;
+      --accent-green: #3fb950;
+      --accent-yellow: #d29922;
+      --accent-red: #f85149;
+      --accent-purple: #bc8cff;
+      --accent-cyan: #39c5cf;
+      --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+      padding: 24px;
+      padding-bottom: 120px;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    /* Top Question & Architecture Header */
+    .prototype-header {
+      background: linear-gradient(135deg, rgba(57, 197, 207, 0.12), rgba(88, 166, 255, 0.08));
+      border: 1px solid rgba(57, 197, 207, 0.3);
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 20px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .badge-proto {
+      background: rgba(210, 153, 34, 0.2);
+      color: var(--accent-yellow);
+      border: 1px solid rgba(210, 153, 34, 0.4);
+    }
+    .badge-tag {
+      background: rgba(57, 197, 207, 0.15);
+      color: var(--accent-cyan);
+      margin-left: 8px;
+    }
+
+    .prototype-header h1 {
+      font-size: 22px;
+      color: var(--text-bright);
+      margin: 12px 0 6px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .prototype-header p {
+      font-size: 14px;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    /* Simulation Control Toolbar */
+    .toolbar {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 18px;
+      margin-bottom: 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      background: #21262d;
+      color: var(--text-bright);
+      border: 1px solid var(--border);
+      padding: 7px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+    .btn:hover {
+      background: #30363d;
+      border-color: #8b949e;
+    }
+    .btn:active {
+      transform: scale(0.98);
+    }
+    .btn-primary {
+      background: #238636;
+      border-color: rgba(240, 246, 252, 0.1);
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: #2ea043;
+    }
+    .btn-outline {
+      background: transparent;
+    }
+
+    select {
+      background: #21262d;
+      color: var(--text-bright);
+      border: 1px solid var(--border);
+      padding: 7px 12px;
+      font-size: 13px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    /* Terminal Main Window */
+    .terminal-window {
+      background: #090d13;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 620px;
+    }
+
+    .terminal-titlebar {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
+    }
+
+    .terminal-dots {
+      display: flex;
+      gap: 7px;
+    }
+    .dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+    }
+    .dot-red { background: #ff5f56; }
+    .dot-yellow { background: #ffbd2e; }
+    .dot-green { background: #27c93f; }
+
+    .terminal-title {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    .terminal-viewport {
+      padding: 20px;
+      flex: 1;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: #e6edf3;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    /* Chat Transcript History */
+    .chat-prompt-line {
+      color: #8b949e;
+      margin-bottom: 6px;
+    }
+    .chat-prompt-user { color: var(--accent-green); font-weight: 600; }
+    .chat-prompt-path { color: var(--accent); }
+
+    /* Finalized Transcript Checkpoint Item */
+    .transcript-trace {
+      background: rgba(22, 27, 34, 0.6);
+      border-left: 3px solid var(--accent-green);
+      padding: 8px 14px;
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      animation: fadeIn 0.25s ease;
+    }
+    .transcript-trace.warning {
+      border-left-color: var(--accent-yellow);
+    }
+    .transcript-trace.error {
+      border-left-color: var(--accent-red);
+    }
+
+    .trace-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 600;
+    }
+    .trace-meta {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: normal;
+    }
+    .trace-sublines {
+      margin-top: 5px;
+      color: #8b949e;
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .subline-branch {
+      color: #484f58;
+    }
+
+    /* Output Interface Live Widget (pi-subagents native style) */
+    .output-live-widget {
+      background: #11161f;
+      border: 1px solid #388bfd;
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-top: 8px;
+      margin-bottom: 8px;
+      box-shadow: 0 4px 16px rgba(56, 139, 253, 0.15);
+      animation: fadeIn 0.3s ease;
+      position: relative;
+    }
+
+    .widget-banner-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: var(--accent);
+      font-weight: 600;
+      border-bottom: 1px dashed rgba(56, 139, 253, 0.3);
+      padding-bottom: 8px;
+      margin-bottom: 10px;
+    }
+
+    .widget-tree-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 12px;
+      margin-bottom: 6px;
+      line-height: 1.4;
+    }
+
+    .tree-glyph {
+      color: #58a6ff;
+      font-weight: bold;
+    }
+    .tree-branch-char {
+      color: #484f58;
+      font-family: var(--font-mono);
+      user-select: none;
+    }
+    .tree-node-name {
+      font-weight: 600;
+      color: #f0f6fc;
+    }
+    .tree-node-status {
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+
+    .tree-active-activity {
+      padding-left: 24px;
+      margin-top: 4px;
+      margin-bottom: 6px;
+      font-size: 11px;
+    }
+    .tree-active-tool {
+      color: var(--accent-cyan);
+      background: rgba(57, 197, 207, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      display: inline-block;
+      margin-bottom: 3px;
+    }
+    .tree-active-output {
+      color: #8b949e;
+      font-style: italic;
+    }
+
+    /* Expand / Collapse Toggle Hint in Widget */
+    .widget-footer-hint {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px dashed rgba(48, 54, 61, 0.8);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: #8b949e;
+    }
+    .key-badge {
+      background: #21262d;
+      border: 1px solid #484f58;
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* Terminal Input Box Simulation */
+    .terminal-editor-mock {
+      background: #161b22;
+      border-top: 1px solid #30363d;
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: #8b949e;
+    }
+    .editor-cursor {
+      display: inline-block;
+      width: 8px;
+      height: 15px;
+      background: var(--accent);
+      vertical-align: middle;
+      animation: blink 1s infinite;
+    }
+
+    /* Terminal Footer Info */
+    .terminal-bottom-status {
+      background: #0d1117;
+      border-top: 1px solid #21262d;
+      padding: 6px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: #6e7681;
+    }
+
+    /* Floating Switcher Bar */
+    .floating-switcher {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #21262d;
+      border: 1px solid #484f58;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+      border-radius: 30px;
+      padding: 6px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      z-index: 1000;
+    }
+
+    .switcher-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-bright);
+      font-size: 16px;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .switcher-btn:hover { background: #30363d; }
+    .switcher-label { font-size: 13px; font-weight: 600; color: var(--text-bright); white-space: nowrap; }
+    .switcher-tag {
+      background: var(--accent-cyan);
+      color: #0d1117;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 12px;
+      margin-left: 6px;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes blink {
+      0%, 49% { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Top Question Banner -->
+  <div class="prototype-header">
+    <div>
+      <span class="badge badge-proto">Output Interface Prototype</span>
+      <span class="badge badge-tag">pi-subagents Native Architecture</span>
+      <span class="badge badge-tag">Live Viewport Widget (aboveEditor)</span>
+    </div>
+    <h1>🖥️ pi-workflow 输出界面实时动态交互原型</h1>
+    <p>
+      <strong>设计要点：</strong> 摒弃容易被冲刷且在 Slash Command 下不生效的底部微状态，全面对齐 <code>pi-subagents</code> 的成熟实践：通过 <code>ctx.ui.setWidget("aboveEditor", ...)</code> 将子代理的<strong>实时帧动画、活跃工具调用、产出预览与阶段管道</strong>直接渲染在<strong>输出界面（终端主视口）</strong>，并在每个节点完成后沉淀永久可回溯的里程碑卡片。
+    </p>
+  </div>
+
+  <!-- Control Toolbar -->
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <span style="font-size: 13px; font-weight: 600; color: var(--text-muted);">运行场景:</span>
+      <select id="scenarioSelect" onchange="loadScenario(this.value)">
+        <option value="happy">1. 标准自动化工作流 (Scout ➔ Plan ➔ Impl ➔ Review PASS)</option>
+        <option value="fix_loop">2. 审查返工循环 (Review Reject ➔ Fix Worker ➔ Review PASS)</option>
+        <option value="test_gate">3. 测试门禁失败 (Test Gate FIX_REQUIRED ➔ Fixer ➔ Review)</option>
+      </select>
+      <button class="btn btn-primary" id="playBtn" onclick="togglePlay()">
+        <span id="playIcon">▶</span> <span id="playText">开始模拟</span>
+      </button>
+      <button class="btn btn-outline" onclick="stepNext()">单步前进 ⏭</button>
+      <button class="btn btn-outline" onclick="resetWorkflow()">重置 ↺</button>
+    </div>
+
+    <div class="toolbar-group">
+      <span style="font-size: 13px; color: var(--text-muted);">模拟速度:</span>
+      <select id="speedSelect" onchange="setSpeed(this.value)">
+        <option value="1">1x 拟真</option>
+        <option value="2" selected>2x 加速</option>
+        <option value="5">5x 极速</option>
+      </select>
+      <button class="btn btn-outline" onclick="toggleExpand()">
+        切换详情展开 (<span class="key-badge">Ctrl+O</span>)
+      </button>
+    </div>
+  </div>
+
+  <!-- Terminal Window -->
+  <div class="terminal-window">
+    <div class="terminal-titlebar">
+      <div class="terminal-dots">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+      </div>
+      <div class="terminal-title">pi · pi-workflow (Output Interface Viewport)</div>
+      <div style="font-size: 11px; color: #58a6ff;" id="variantIndicator">Variant 1: Tree-Branch Live Widget (pi-subagents native)</div>
+    </div>
+
+    <!-- Output Viewport (Main Chat & Widget Area) -->
+    <div class="terminal-viewport" id="terminalViewport">
+      <!-- Content rendered by JS -->
+    </div>
+
+    <!-- Simulated Input Box (Widget is anchored above this) -->
+    <div class="terminal-editor-mock">
+      <span style="color: var(--accent-cyan);">/work</span>
+      <span style="color: #6e7681;">auto "审核 docs/pi-workflow.spec.md 的开发结果"</span>
+      <span class="editor-cursor"></span>
+    </div>
+
+    <!-- Terminal Footer Status Line -->
+    <div class="terminal-bottom-status">
+      <span id="footerRunId">Run: wf_20260821_231015_b94e</span>
+      <span id="footerTokens">Token Velocity: 4.8k tok/s</span>
+      <span style="color: #58a6ff;">按 <strong>Ctrl+O</strong> 切换输出区工具详情展开</span>
+    </div>
+  </div>
+</div>
+
+<!-- Floating Switcher Bar -->
+<div class="floating-switcher">
+  <button class="switcher-btn" onclick="prevVariant()" title="上一个视图 (←)">◀</button>
+  <div class="switcher-label">
+    <span id="curVariantKey">Variant 1</span>
+    <span class="switcher-tag" id="curVariantTag">树形分支看板 (原生推荐)</span>
+  </div>
+  <button class="switcher-btn" onclick="nextVariant()" title="下一个视图 (→)">▶</button>
+</div>
+
+<script>
+  // Animation frames for live spinner
+  const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let spinnerIndex = 0;
+
+  const VARIANTS = [
+    {
+      id: "1",
+      name: "Tree-Branch Live Widget (pi-subagents native)",
+      tag: "树形分支看板 (原生推荐)",
+      desc: "完全继承 pi-subagents 的 setWidget 架构，在输入框上方挂载带 ⎿ 树形分支的动态组件，实时显示正在执行的工具与输出"
+    },
+    {
+      id: "2",
+      name: "Progressive Step Card (渐进式卡片)",
+      tag: "流式渐进卡片",
+      desc: "在主输出流中以单卡片渐进演变，执行中展开动态进度，执行完毕后就地紧凑折叠并沉淀"
+    },
+    {
+      id: "3",
+      name: "Interactive Dual-Pane Inspector (交互双栏)",
+      tag: "实时分栏监视",
+      desc: "输出区上方左侧展示工作流节点流水线，右侧实时流式打印子代理的标准输出与工具参数"
+    }
+  ];
+
+  let currentVariantIndex = 0;
+  let currentStepIndex = 0;
+  let isPlaying = false;
+  let playTimer = null;
+  let speedMultiplier = 2;
+  let elapsedSeconds = 0;
+  let timerInterval = null;
+  let isToolsExpanded = false;
+
+  // Realistic execution scenarios with intermediate subagent tool calls
+  const SCENARIOS = {
+    happy: [
+      {
+        node: "scout",
+        agent: "scout",
+        status: "running",
+        action: "Exploring repository structure...",
+        tool: "find_by_name",
+        toolArgs: "Pattern: 'src/**/*.ts'",
+        stdout: "Found 60 TypeScript source files in project root.",
+        duration: 3,
+        tokens: 18400,
+        completedNode: null
+      },
+      {
+        node: "plan",
+        agent: "planner",
+        status: "running",
+        action: "Formulating structured implementation plan...",
+        tool: "read_file",
+        toolArgs: "docs/pi-workflow.spec.md (lines 1-150)",
+        stdout: "Analyzing core requirements: quality gates, reviewer freshness, retry policies.",
+        duration: 4,
+        tokens: 65200,
+        completedNode: {
+          node: "scout",
+          agent: "scout",
+          title: "Scouted repository structure",
+          duration: "3.2s",
+          tokens: "18.4k",
+          details: ["✓ Found 60 source files", "✓ Identified core spec docs/pi-workflow.spec.md"]
+        }
+      },
+      {
+        node: "implement",
+        agent: "worker",
+        status: "running",
+        action: "Executing code implementation and tests...",
+        tool: "edit_file",
+        toolArgs: "src/engine/transitions.ts (+24 -4 lines)",
+        stdout: "Applied patch · Running npm test: 7/7 tests passed (1.1s).",
+        duration: 5,
+        tokens: 142000,
+        completedNode: {
+          node: "plan",
+          agent: "planner",
+          title: "Plan approved (4 steps, low complexity)",
+          duration: "4.1s",
+          tokens: "65.2k",
+          details: ["✓ 4 execution steps planned", "✓ 3 files targeted", "✓ Plan Gate: PASS"]
+        }
+      },
+      {
+        node: "review-1",
+        agent: "reviewer",
+        status: "running",
+        action: "Independent review in progress (fresh context)...",
+        tool: "read_file",
+        toolArgs: "git diff HEAD~1",
+        stdout: "Inspecting reviewer isolation and transition safety against specification.",
+        duration: 4,
+        tokens: 210000,
+        completedNode: {
+          node: "implement",
+          agent: "worker",
+          title: "Implementation completed (3 files changed, tests passed)",
+          duration: "8.4s",
+          tokens: "142.0k",
+          details: ["✓ src/engine/transitions.ts (+24 -4)", "✓ Test Gate: 7/7 passed"]
+        }
+      },
+      {
+        node: "completed",
+        agent: null,
+        status: "completed",
+        action: "Workflow completed successfully!",
+        tool: null,
+        toolArgs: null,
+        stdout: null,
+        duration: 1,
+        tokens: 240100,
+        completedNode: {
+          node: "review-1",
+          agent: "reviewer",
+          title: "Verdict: PASS (0 findings, round 1)",
+          duration: "3.9s",
+          tokens: "210.0k",
+          details: ["✓ Core Invariant satisfied (Fresh Context)", "✓ All quality gates met"]
+        }
+      }
+    ],
+    fix_loop: [
+      {
+        node: "scout",
+        agent: "scout",
+        status: "running",
+        action: "Exploring codebase...",
+        tool: "find_by_name",
+        toolArgs: "*.ts",
+        stdout: "Scanning repo...",
+        duration: 2,
+        tokens: 14000,
+        completedNode: null
+      },
+      {
+        node: "plan",
+        agent: "planner",
+        status: "running",
+        action: "Generating plan...",
+        tool: "read_file",
+        toolArgs: "docs/spec.md",
+        stdout: "Plan generated.",
+        duration: 3,
+        tokens: 52000,
+        completedNode: {
+          node: "scout",
+          agent: "scout",
+          title: "Scouted repository structure",
+          duration: "2.1s",
+          tokens: "14.0k",
+          details: ["✓ Identified 60 files"]
+        }
+      },
+      {
+        node: "implement",
+        agent: "worker",
+        status: "running",
+        action: "Implementing plan...",
+        tool: "edit_file",
+        toolArgs: "src/engine/engine.ts",
+        stdout: "Changes applied.",
+        duration: 4,
+        tokens: 110000,
+        completedNode: {
+          node: "plan",
+          agent: "planner",
+          title: "Plan approved (4 steps)",
+          duration: "3.5s",
+          tokens: "52.0k",
+          details: ["✓ Mode: normal"]
+        }
+      },
+      {
+        node: "review-1",
+        agent: "reviewer",
+        status: "running",
+        action: "Reviewer #1 checking diff...",
+        tool: "read_file",
+        toolArgs: "diff",
+        stdout: "Found missing guard on run.plan.",
+        duration: 3,
+        tokens: 165000,
+        completedNode: {
+          node: "implement",
+          agent: "worker",
+          title: "Implementation completed",
+          duration: "6.2s",
+          tokens: "110.0k",
+          details: ["✓ 1 file modified"]
+        }
+      },
+      {
+        node: "fix-1",
+        agent: "worker",
+        status: "running",
+        action: "Fix worker applying review findings...",
+        tool: "edit_file",
+        toolArgs: "src/engine/transitions.ts (+10 -2)",
+        stdout: "Added guard assertion · npm test: passed.",
+        duration: 4,
+        tokens: 225000,
+        completedNode: {
+          node: "review-1",
+          agent: "reviewer",
+          warning: true,
+          title: "Verdict: REQUEST_CHANGES (1 finding, round 1)",
+          duration: "4.1s",
+          tokens: "165.0k",
+          details: ["⚠️ [HIGH] transitions.ts: Missing null guard on run.plan"]
+        }
+      },
+      {
+        node: "review-2",
+        agent: "reviewer",
+        status: "running",
+        action: "Reviewer #2 (Fresh Context) re-verifying...",
+        tool: "read_file",
+        toolArgs: "diff",
+        stdout: "All previous findings resolved.",
+        duration: 3,
+        tokens: 280000,
+        completedNode: {
+          node: "fix-1",
+          agent: "worker",
+          title: "Fix round 1 completed (tests passed)",
+          duration: "5.4s",
+          tokens: "225.0k",
+          details: ["✓ Addressed 1 finding", "✓ All tests pass"]
+        }
+      },
+      {
+        node: "completed",
+        agent: null,
+        status: "completed",
+        action: "Completed after 1 fix round!",
+        duration: 1,
+        tokens: 295000,
+        completedNode: {
+          node: "review-2",
+          agent: "reviewer",
+          title: "Verdict: PASS (0 findings, round 2)",
+          duration: "3.2s",
+          tokens: "280.0k",
+          details: ["✓ All quality gates satisfied"]
+        }
+      }
+    ]
+  };
+
+  let activeScenario = SCENARIOS.happy;
+
+  function loadScenario(key) {
+    activeScenario = SCENARIOS[key] || SCENARIOS.happy;
+    resetWorkflow();
+  }
+
+  function resetWorkflow() {
+    pause();
+    currentStepIndex = 0;
+    elapsedSeconds = 0;
+    clearInterval(timerInterval);
+    timerInterval = null;
+    render();
+  }
+
+  function togglePlay() {
+    if (isPlaying) pause();
+    else play();
+  }
+
+  function play() {
+    isPlaying = true;
+    document.getElementById("playIcon").innerText = "⏸";
+    document.getElementById("playText").innerText = "暂停";
+
+    if (!timerInterval) {
+      timerInterval = setInterval(() => {
+        elapsedSeconds++;
+        spinnerIndex = (spinnerIndex + 1) % SPINNER_FRAMES.length;
+        render();
+      }, 1000 / (speedMultiplier * 2));
+    }
+
+    runNextStep();
+  }
+
+  function pause() {
+    isPlaying = false;
+    document.getElementById("playIcon").innerText = "▶";
+    document.getElementById("playText").innerText = "开始模拟";
+    if (playTimer) clearTimeout(playTimer);
+    clearInterval(timerInterval);
+    timerInterval = null;
+    render();
+  }
+
+  function runNextStep() {
+    if (!isPlaying) return;
+    if (currentStepIndex >= activeScenario.length - 1) {
+      pause();
+      return;
+    }
+
+    const step = activeScenario[currentStepIndex];
+    const delay = ((step.duration || 3) * 1000) / speedMultiplier;
+
+    playTimer = setTimeout(() => {
+      if (!isPlaying) return;
+      currentStepIndex++;
+      render();
+      if (currentStepIndex < activeScenario.length - 1) {
+        runNextStep();
+      } else {
+        pause();
+      }
+    }, delay);
+  }
+
+  function stepNext() {
+    pause();
+    if (currentStepIndex < activeScenario.length - 1) {
+      currentStepIndex++;
+      elapsedSeconds += 4;
+      render();
+    }
+  }
+
+  function setSpeed(val) {
+    speedMultiplier = parseInt(val, 10);
+    if (isPlaying) {
+      clearInterval(timerInterval);
+      timerInterval = setInterval(() => {
+        elapsedSeconds++;
+        spinnerIndex = (spinnerIndex + 1) % SPINNER_FRAMES.length;
+        render();
+      }, 1000 / (speedMultiplier * 2));
+    }
+  }
+
+  function toggleExpand() {
+    isToolsExpanded = !isToolsExpanded;
+    render();
+  }
+
+  function prevVariant() {
+    currentVariantIndex = (currentVariantIndex - 1 + VARIANTS.length) % VARIANTS.length;
+    updateVariantBar();
+    render();
+  }
+
+  function nextVariant() {
+    currentVariantIndex = (currentVariantIndex + 1) % VARIANTS.length;
+    updateVariantBar();
+    render();
+  }
+
+  function updateVariantBar() {
+    const cur = VARIANTS[currentVariantIndex];
+    document.getElementById("curVariantKey").innerText = `Variant ${cur.id}`;
+    document.getElementById("curVariantTag").innerText = cur.tag;
+    document.getElementById("variantIndicator").innerText = `Variant ${cur.id}: ${cur.name}`;
+  }
+
+  // Render main viewport content
+  function render() {
+    const viewport = document.getElementById("terminalViewport");
+    const currentStep = activeScenario[currentStepIndex];
+    const curVariant = VARIANTS[currentVariantIndex];
+    const glyph = SPINNER_FRAMES[spinnerIndex % SPINNER_FRAMES.length];
+
+    let html = `
+      <div class="chat-prompt-line">
+        <span class="chat-prompt-user">tcuni-claw@pi</span>:<span class="chat-prompt-path">~/pi/pi-workflow</span>$ /work auto "审核 docs/pi-workflow.spec.md 的开发结果"
+      </div>
+    `;
+
+    // 1. Render permanent historical transcript checkpoints created so far
+    for (let i = 0; i <= currentStepIndex; i++) {
+      const item = activeScenario[i];
+      if (item.completedNode) {
+        const c = item.completedNode;
+        html += `
+          <div class="transcript-trace ${c.warning ? 'warning' : ''}">
+            <div class="trace-title-row">
+              <span style="color: ${c.warning ? 'var(--accent-yellow)' : 'var(--accent-green)'};">
+                ${c.warning ? '⚠️' : '✓'} [${c.agent}] ${c.title}
+              </span>
+              <span class="trace-meta">${c.duration} · ${c.tokens} tok</span>
+            </div>
+            <div class="trace-sublines">
+              ${c.details.map(d => `<div><span class="subline-branch">⎿ </span>${d}</div>`).join('')}
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    // 2. Render Live Widget in Output Viewport (if workflow is actively running)
+    if (currentStep.status === "running") {
+      if (curVariant.id === "1") {
+        html += renderVariant1Widget(currentStep, glyph);
+      } else if (curVariant.id === "2") {
+        html += renderVariant2Card(currentStep, glyph);
+      } else if (curVariant.id === "3") {
+        html += renderVariant3DualPane(currentStep, glyph);
+      }
+    } else {
+      // Completed Summary
+      html += `
+        <div style="background: rgba(63, 185, 80, 0.12); border: 1px solid var(--accent-green); border-radius: 8px; padding: 14px 18px; margin-top: 8px;">
+          <div style="font-weight: 600; color: var(--accent-green); margin-bottom: 6px;">
+            🎉 pi-workflow · completed successfully
+          </div>
+          <div style="font-size: 12px; color: #adbac7;">
+            • Total Duration: 24.8s · Total Tokens: ${(currentStep.tokens / 1000).toFixed(1)}k<br>
+            • All Review Gates passed with fresh context isolation.<br>
+            • Artifacts recorded: <code>state.json</code>, <code>plan.json</code>, <code>final.json</code>.
+          </div>
+        </div>
+      `;
+    }
+
+    viewport.innerHTML = html;
+    viewport.scrollTop = viewport.scrollHeight;
+  }
+
+  // --- Variant 1: Tree-Branch Live Widget (pi-subagents native) ---
+  function renderVariant1Widget(step, glyph) {
+    return `
+      <div class="output-live-widget">
+        <div class="widget-banner-header">
+          <span>
+            <span class="tree-glyph">${glyph}</span> [pi-workflow] auto (normal) · active workflow
+          </span>
+          <span style="font-size: 11px; color: var(--text-muted);">
+            Node: <strong>${step.node}</strong> · ${(step.tokens / 1000).toFixed(1)}k tokens
+          </span>
+        </div>
+
+        <div style="padding-left: 4px;">
+          <div class="widget-tree-row">
+            <span class="tree-glyph">${glyph}</span>
+            <div>
+              <span class="tree-node-name">${step.agent}</span>
+              <span class="tree-node-status">(${step.action})</span>
+            </div>
+          </div>
+
+          <div class="tree-active-activity">
+            ${step.tool ? `
+              <div>
+                <span class="tree-branch-char">⎿ </span>
+                <span class="tree-active-tool">tool: ${step.tool}</span>
+                <span style="color: #adbac7; font-size: 11px;">(${step.toolArgs || ''})</span>
+              </div>
+            ` : ''}
+            ${step.stdout ? `
+              <div style="margin-top: 3px;">
+                <span class="tree-branch-char">  ⎿ </span>
+                <span class="tree-active-output">${step.stdout}</span>
+              </div>
+            ` : ''}
+            ${isToolsExpanded ? `
+              <div style="margin-top: 6px; padding: 6px 10px; background: #090d13; border: 1px solid #30363d; border-radius: 4px; color: #8b949e; font-size: 11px;">
+                <div>> Context: fresh | Subagent Pid: 84920 | Memory: 42MB</div>
+                <div>> Tool execution started at: +0.4s | Status: I/O in flight</div>
+              </div>
+            ` : ''}
+          </div>
+        </div>
+
+        <div class="widget-footer-hint">
+          <span>挂载位置: <code>ctx.ui.setWidget("aboveEditor")</code> (主输出界面)</span>
+          <span>按 <span class="key-badge">Ctrl+O</span> ${isToolsExpanded ? '折叠详情' : '展开实时工具输出'}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  // --- Variant 2: Progressive Step Card ---
+  function renderVariant2Card(step, glyph) {
+    return `
+      <div style="background: #161b22; border-left: 3px solid var(--accent-cyan); border-radius: 0 8px 8px 0; padding: 12px 16px; margin: 8px 0;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="color: var(--accent-cyan); font-weight: 600; font-size: 13px;">
+            ${glyph} [${step.agent}] ${step.action}
+          </span>
+          <span style="font-size: 11px; color: var(--text-muted);">${(step.tokens / 1000).toFixed(1)}k tokens</span>
+        </div>
+        ${step.tool ? `
+          <div style="margin-top: 8px; font-size: 12px; color: #adbac7;">
+            ↳ 正在调用工具: <code>${step.tool}</code> (${step.toolArgs || ''})
+          </div>
+        ` : ''}
+        ${step.stdout ? `
+          <div style="margin-top: 4px; font-size: 11px; color: #8b949e;">
+            ↳ 实时输出: <em>${step.stdout}</em>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  // --- Variant 3: Dual-Pane Split View ---
+  function renderVariant3DualPane(step, glyph) {
+    return `
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; background: #11161f; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin: 8px 0;">
+        <div>
+          <div style="font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 6px;">
+            ${glyph} 工作流阶段流水线 (Pipeline)
+          </div>
+          <div style="font-size: 12px; line-height: 1.6;">
+            <div>• Scout ➔ ✓ Done</div>
+            <div>• Plan ➔ ✓ Done</div>
+            <div style="color: var(--accent-cyan); font-weight: bold;">• ${step.node} ➔ ${glyph} ${step.action}</div>
+            <div style="color: #6e7681;">• Review ➔ ○ Pending</div>
+          </div>
+        </div>
+        <div style="border-left: 1px solid #21262d; padding-left: 12px;">
+          <div style="font-size: 11px; font-weight: 600; color: var(--accent-cyan); margin-bottom: 6px;">
+            ⚡ 实时子代理 I/O (Subagent Output)
+          </div>
+          <div style="font-size: 11px; color: #8b949e; line-height: 1.5;">
+            <div>Tool: <span style="color: #f0f6fc;">${step.tool || 'none'}</span></div>
+            <div>Args: <span style="color: #f0f6fc;">${step.toolArgs || 'none'}</span></div>
+            <div>Stdout: <span style="color: #adbac7;">${step.stdout || 'none'}</span></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Keyboard navigation for variants & expand toggle
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") prevVariant();
+    else if (e.key === "ArrowRight") nextVariant();
+    else if (e.ctrlKey && e.key.toLowerCase() === "o") {
+      e.preventDefault();
+      toggleExpand();
+    }
+  });
+
+  // Initial render
+  updateVariantBar();
+  render();
+</script>
+
+</body>
+</html>

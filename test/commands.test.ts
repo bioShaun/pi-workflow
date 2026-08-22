@@ -218,11 +218,23 @@ describe("CLI Parser and UX Renderer", () => {
     function makeNotifier() {
       const notifications: Array<{ msg: string; type: string }> = [];
       const working: Array<string | undefined> = [];
-      const notifier = createProgressNotifier(
-        (msg, type = "info") => notifications.push({ msg, type }),
-        (msg) => working.push(msg)
-      );
-      return { notifier, notifications, working };
+      let mountedWidgetKey = "";
+      let mountedWidgetPlacement = "";
+      const widgetHolder: { widget?: any } = {};
+
+      const fakeUI: any = {
+        hasUI: () => true,
+        isRPC: () => false,
+        notify: (msg: string, type = "info") => notifications.push({ msg, type }),
+        setWorking: (msg?: string) => working.push(msg),
+        setWidget: (key: string, content: unknown, options?: any) => {
+          mountedWidgetKey = key;
+          mountedWidgetPlacement = options?.placement ?? "";
+        },
+      };
+
+      const notifier = createProgressNotifier(fakeUI, widgetHolder);
+      return { notifier, notifications, working, widgetHolder, getMountedKey: () => mountedWidgetKey, getMountedPlacement: () => mountedWidgetPlacement };
     }
 
     function endEvent(
@@ -233,7 +245,7 @@ describe("CLI Parser and UX Renderer", () => {
     ): WorkflowProgressEvent {
       return {
         type: "node_end",
-        run: {} as WorkflowRun,
+        run: { id: "wf_test", mode: "normal" } as WorkflowRun,
         nodeId,
         agent,
         action,
@@ -242,6 +254,39 @@ describe("CLI Parser and UX Renderer", () => {
         details,
       };
     }
+
+    it("attaches WorkflowLiveWidget on node_start and updates state on node_update", () => {
+      const { notifier, widgetHolder, getMountedKey, getMountedPlacement } = makeNotifier();
+
+      notifier({
+        type: "node_start",
+        run: { id: "wf_test", mode: "normal" } as WorkflowRun,
+        nodeId: "worker",
+        agent: "worker",
+        action: "Executing code changes...",
+        tokens: 1000,
+      });
+
+      assert.ok(widgetHolder.widget);
+      assert.equal(getMountedKey(), "pi-workflow-live");
+      assert.equal(getMountedPlacement(), "aboveEditor");
+      assert.equal(widgetHolder.widget.state.node, "worker");
+
+      notifier({
+        type: "node_update",
+        run: { id: "wf_test", mode: "normal" } as WorkflowRun,
+        nodeId: "worker",
+        agent: "worker",
+        action: "Executing code changes...",
+        durationMs: 4200,
+        tokens: 8500,
+        details: { currentTool: "edit_file", currentToolArgs: "src/main.ts", recentOutput: "Applied patch" },
+      });
+
+      assert.equal(widgetHolder.widget.state.tokens, 8500);
+      assert.deepEqual(widgetHolder.widget.state.tool, { name: "edit_file", args: "src/main.ts" });
+      assert.equal(widgetHolder.widget.state.stdout, "Applied patch");
+    });
 
     it("maps a review REQUEST_CHANGES terminal event to a warning trace with findings", () => {
       const { notifier, notifications } = makeNotifier();
@@ -338,10 +383,12 @@ describe("CLI Parser and UX Renderer", () => {
       const notifications: Array<{ msg: string; type: string }> = [];
       const working: Array<string | undefined> = [];
       const ctx: any = {
+        hasUI: true,
         cwd: process.cwd(),
         ui: {
           notify: (msg: string, type = "info") => notifications.push({ msg, type }),
           setWorkingMessage: (msg?: string) => working.push(msg),
+          setWidget: () => {},
         },
       };
 
