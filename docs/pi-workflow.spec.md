@@ -1,10 +1,19 @@
 # pi-workflow Extension Engineering Specification
 
-**Status:** Implementation Ready  
+**Status:** Implemented (v0.1; original "Implementation Ready" status superseded by the sync below)  
 **Version:** 0.1 MVP  
 **Target:** Pi Coding Agent Extension  
 **Primary dependency:** `pi-subagents`  
 **Primary integration contract:** `pi-subagents/delegation`
+
+> **Documentation sync (2026-08-21):** the normative body (§1–§49) has been re-checked
+> against the implemented v0.1 source tree and updated where the implementation (already
+> reviewed and unit-tested) diverged from the original prose — state fields (`autoRouted`,
+> `modeResolved`), adapter progress streaming, preflight semantics, prompt autonomy rule,
+> repository layout, test inventory, and live output UX. §52 (audit findings and
+> remediation) is the historical record and is preserved as-is. The dated §46 acceptance
+> record (69/69 tests, 2026-08-21) remains a point-in-time record; the current suite is
+> 103 tests (`npm test`).
 
 ---
 
@@ -152,6 +161,7 @@ MVP MUST provide:
 /work status
 /work resume
 /work abort
+/work list
 ```
 
 It MUST support:
@@ -311,6 +321,14 @@ context: "fresh"
 
 Never rely on package defaults for reviewer isolation.
 
+Planner fork degradation (audit Finding 1, §52): when the parent session has not yet been
+persisted, pi-subagents fails the planner's `fork` deterministically ("parent session file
+does not exist", "not persisted enough history to fork yet", and two related pre-checks).
+This is NOT an agent failure: the engine degrades the planner to a `fresh` context instead
+of consuming the agent retry budget, because the planner prompt is self-contained (task +
+optional scout summary) and a fresh execution remains correct. The degradation is recorded
+as a `planner.fork_unavailable` event. Detection lives in `src/policies/fork.ts`.
+
 Add an assertion in code:
 
 ```ts
@@ -456,6 +474,12 @@ fix-2
 final-review
 ```
 
+Strict-mode review rounds additionally get the specialized reviewer node
+identities `review-N-a` and `review-N-b`. The final fresh reviewer
+`review-N-final` runs in a round only after BOTH Reviewer A and Reviewer B
+return PASS (see §35); a round in which either one requests changes
+transitions straight to `fixing` and never launches `review-N-final`.
+
 Do not use array position as identity.
 
 ---
@@ -534,8 +558,22 @@ interface WorkflowRun {
   error?: WorkflowError;
 
   baseline: RepositoryBaseline;
+
+  /**
+   * True when the user did not pass an explicit mode flag to `/work auto`,
+   * so the mode is auto-routed from the plan's complexity (audit Finding 6,
+   * §24/§25). Auto-routed runs launch the planner first and only scout when
+   * the resolved mode is normal/strict.
+   */
+  autoRouted?: boolean;
+
+  /** True once the mode has been finalized (creation for explicit, post-plan for auto). */
+  modeResolved?: boolean;
 }
 ```
+
+`WorkflowError` (persisted in `error`) is `{ code, message, nodeId? }` plus an optional
+`details` blob for diagnostics; `nodeId` names the failing node where applicable.
 
 State writes MUST be atomic:
 
@@ -569,6 +607,21 @@ Example:
 Event history is informational/recovery-oriented.
 
 `state.json` remains the current authoritative snapshot.
+
+Events emitted by the v0.1 implementation (audit Finding 11 added the node lifecycle
+pairs so resume can distinguish "node completed" from "node interrupted"):
+
+```text
+workflow.created
+node.started / node.completed     (once per logical node, including strict reviewers A/B/final; retries within a node do not re-emit the pair)
+node.failed
+state.changed                     (from / to / node / reason, written by the state machine)
+gate.test                         (test-gate status and reason)
+mode.resolved                      (auto-routed mode finalization, Finding 6)
+planner.fork_unavailable           (Finding 1 fork degradation)
+workflow.preflight_failed          (resume path that cannot preflight)
+workflow.failed
+```
 
 ---
 
@@ -628,6 +681,15 @@ zod
 or the project's existing schema library.
 
 JSON Schema passed to `pi-subagents` SHOULD match the runtime schema.
+
+Implementation note (v0.1): no external schema library is used. Each result contract
+module (`plan.ts`, `implementation.ts`, `review.ts`, `fix.ts`, `scout.ts`) ships a
+hand-rolled runtime validator (`validatePlanResult`, `validateImplementationResult`,
+`validateReviewResult`, `validateFixResult`, `validateScoutResult`) plus a JSON Schema
+constant (e.g. `REVIEW_RESULT_SCHEMA`, `additionalProperties: false`) that is passed to
+`pi-subagents` as the structured-output schema. The two MUST stay in sync per contract.
+`workflow.ts` instead exports `validateWorkflowRun` for persisted-state validation and
+has no delegation JSON Schema constant.
 
 ---
 
@@ -754,6 +816,12 @@ interface ReviewResult {
   };
 
   confidence: number;
+
+  /** Reviewer identity ("reviewer-1", "reviewer-a", "reviewer-b", "reviewer-final"); set by the engine. */
+  reviewerId?: string;
+
+  /** 1-based review round this result belongs to; set by the engine. */
+  round?: number;
 }
 ```
 
@@ -847,6 +915,9 @@ interface FixResult {
   }>;
 
   tests: TestResult[];
+
+  /** 1-based fix round (own counter, independent of review rounds); set by the engine. */
+  round?: number;
 }
 ```
 
@@ -1000,6 +1071,15 @@ Failure reason:
 review_budget_exhausted
 ```
 
+If the budget is exhausted while the latest reviewer(s) PASSED but the completion gate is
+still unsatisfied (e.g. required tests still failing), the run instead fails with:
+
+```text
+required_tests_failed
+```
+
+i.e. `review_budget_exhausted` is used only when a reviewer actually requested changes.
+
 Do NOT silently continue indefinitely.
 
 Expose config later.
@@ -1102,6 +1182,10 @@ Final Reviewer [fresh]
 
 All reviewers MUST use fresh context.
 
+The `Final Reviewer` runs only when Reviewers A and B both PASS in the round;
+a `REQUEST_CHANGES` from either one sends the round to `Fix` without
+launching a `review-N-final` node (see §35).
+
 In MVP reviewers MAY run sequentially.
 
 Parallel execution is not required for v0.1.
@@ -1159,9 +1243,36 @@ If no override:
 
 uses automatic complexity routing.
 
+Routing timing (audit Finding 6, §52): an auto-routed run launches the planner FIRST and
+finalizes the mode only after the plan exists (the `mode.resolved` event is persisted and the
+`modeResolved` flag makes this idempotent across resume):
+
+```text
+initial mode = defaultMode (mode unresolved until the plan is in)
+  → plan
+  → resolve mode from the plan:
+      quick     → maxReviewRounds = 2, no scout
+      normal    → scout runs AFTER the plan; its result feeds the worker
+      strict    → scout runs AFTER the plan; strict reviewer set per round
+```
+
+An explicit `--quick`/`--normal`/`--strict` override disables auto-routing entirely
+(`autoRouted = false`): the mode is final at creation and normal/strict scout BEFORE
+planning, as in `/work plan`.
+
 ---
 
 # 26. Commands
+
+Argument parsing (implemented in `src/commands/parser.ts`):
+
+```text
+/work                      → help
+/work help                 → help
+plan / auto                → accept --quick|--normal|--strict anywhere in the arguments
+implement/review/fix/status/resume/abort → optional runId (defaults to the active run)
+first arg not a recognized subcommand → the whole line is treated as /work auto <task>
+```
 
 ## `/work plan <task>`
 
@@ -1224,7 +1335,9 @@ Never resume an old reviewer.
 
 ## `/work fix`
 
-Requires latest reviewer:
+Valid when the run state is `fixing`. The run enters `fixing` from a review
+`REQUEST_CHANGES` or from a test-gate `FIX_REQUIRED` (`testing → fixing`). When the
+state is not already `fixing`, the latest reviewer must have returned:
 
 ```text
 REQUEST_CHANGES
@@ -1248,11 +1361,13 @@ Fully automated bounded workflow:
 ```text
 baseline
  ↓
-scout
+scout (explicit normal/strict only; before planning — skipped for auto-routed and quick)
  ↓
 plan
  ↓
-complexity routing
+mode resolution (auto-routed runs only: low → quick, medium → normal, high/strict triggers → strict)
+ ↓
+scout (post-plan, auto-routed normal/strict only; quick skips it)
  ↓
 implement
  ↓
@@ -1296,6 +1411,11 @@ Review round
 Latest verdict
 Outstanding findings
 ```
+
+Run resolution: an explicit runId wins; otherwise the active-run pointer is used. With
+neither (no active pointer and no runId), `/work status` falls back to the most recent
+run in `.pi/workflow/runs` (newest first); with no runs at all it prints a starter hint
+instead of an error.
 
 Example:
 
@@ -1360,6 +1480,13 @@ Output:
 Workflow aborted.
 Repository changes were preserved.
 ```
+
+Aborting an already-terminal run is a no-op that returns the run as-is.
+
+## `/work list`
+
+Read-only listing of every workflow run under `.pi/workflow/runs`, newest first. Never
+touches the active-run lock and never modifies a run.
 
 ---
 
@@ -1436,6 +1563,29 @@ interface AgentExecutionRequest<T> {
   thinking?: string;
 
   timeoutMs?: number;
+
+  model?: string;
+
+  /** Optional streaming progress hook (current tool, args, recent output, tokens, duration). */
+  onUpdate?: (update: AgentProgressUpdate) => void;
+}
+```
+
+Progress update (implemented in `src/agents/executor.ts` as `AgentProgressUpdate`):
+
+```ts
+interface AgentProgressUpdate {
+  nodeId: string;
+  agent: string;
+  currentTool?: string;
+  currentToolArgs?: string;
+  recentOutput?: string;
+  recentOutputLines?: string[];
+  recentTools?: Array<{ tool: string; args: string }>;
+  model?: string;
+  toolCount?: number;
+  durationMs?: number;
+  tokens?: number;
 }
 ```
 
@@ -1446,7 +1596,8 @@ interface AgentExecutionResult<T> {
   status:
     | "completed"
     | "failed"
-    | "cancelled";
+    | "cancelled"
+    | "timed_out";
 
   result?: T;
 
@@ -1455,14 +1606,23 @@ interface AgentExecutionResult<T> {
   usage?: {
     input?: number;
     output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
     cost?: number;
     durationMs?: number;
+    turns?: number;
+    toolCalls?: number;
   };
 
   model?: string;
   thinking?: string;
 }
 ```
+
+`onUpdate` is the streaming channel behind the live progress UI: `PiSubagentsExecutor`
+forwards pi-subagents delegation update events as `AgentProgressUpdate`s, and the engine
+surfaces them as `WorkflowProgressEvent`s (see §40). `FakeAgentExecutor` may ignore the
+hook entirely.
 
 Production implementation:
 
@@ -1518,6 +1678,21 @@ Error should explain exactly which role cannot launch.
 
 Use `pi-subagents/preflight` rather than guessing available tools/models.
 
+Implementation details (v0.1, `src/agents/preflight.ts`):
+
+- Quick mode requires only `planner`, `worker`, `reviewer` (scout is skipped in quick);
+  normal/strict additionally require `scout`.
+- Each role has a small candidate fallback list (e.g. `scout → researcher`,
+  `planner → researcher / scout / oracle`); a candidate that fails its launch-contract
+  check triggers the next candidate. A THROWN preflight failure is a genuine failure and
+  is surfaced immediately — it never masks into a fallback (audit Finding 10; §52).
+- Module-loading errors from `pi-subagents/preflight` (`ERR_MODULE_NOT_FOUND` and peers)
+  mean the module is simply unavailable in this runtime (e.g. plain `node`); preflight is
+  then skipped with a `preflight_module_unavailable` diagnostic and `moduleUnavailable =
+  true`. Anything the preflight logic itself throws is a real failure, not a skip.
+- The resolved role → agent mapping is RETURNED and used for the whole run; the engine
+  never mutates `config.agents` (audit Finding 10).
+
 ---
 
 # 30. Role Capability Expectations
@@ -1554,16 +1729,24 @@ Prompt templates belong in:
 src/prompts/
 ```
 
-Suggested:
+Suggested (and implemented in v0.1):
 
 ```text
 src/prompts/
+├── common.ts    — shared rules (autonomy constraint, below)
 ├── scout.ts
 ├── planner.ts
 ├── worker.ts
 ├── reviewer.ts
 └── fixer.ts
 ```
+
+Autonomy constraint (audit Finding 13, §52): every node prompt appends a `## Autonomy
+Constraint` section (`AUTONOMOUS_EXECUTION_RULE` in `src/prompts/common.ts`) that prohibits
+`contact_supervisor`, `intercom`, and any coordination/progress-reporting tool: such calls
+detach a delegated run and discard its result, and no supervisor is waiting. This is
+prevention, not a guarantee — the engine additionally retries intercom-detach-class
+failures once with an explicit prohibition reminder (`src/policies/intercom.ts`).
 
 Keep prompts compact.
 
@@ -1585,17 +1768,22 @@ Prompts define only the node's local contract.
 
 ```text
 pi-workflow/
+├── index.ts                 (package entrypoint: re-exports src/)
 ├── package.json
 ├── tsconfig.json
 ├── README.md
 │
 ├── src/
+│   ├── index.ts             (library entrypoint: re-exports extension + public API)
 │   ├── extension.ts
 │   │
 │   ├── commands/
 │   │   ├── work.ts
 │   │   ├── parser.ts
-│   │   └── renderer.ts
+│   │   ├── renderer.ts
+│   │   ├── ui-port.ts
+│   │   ├── widget.ts
+│   │   └── widget-renderer.ts
 │   │
 │   ├── engine/
 │   │   ├── engine.ts
@@ -1613,6 +1801,7 @@ pi-workflow/
 │   │   ├── implementation.ts
 │   │   ├── review.ts
 │   │   ├── fix.ts
+│   │   ├── scout.ts
 │   │   └── workflow.ts
 │   │
 │   ├── gates/
@@ -1624,9 +1813,13 @@ pi-workflow/
 │   ├── policies/
 │   │   ├── complexity.ts
 │   │   ├── context.ts
-│   │   └── retry.ts
+│   │   ├── retry.ts
+│   │   ├── fork.ts
+│   │   ├── intercom.ts
+│   │   └── refusal.ts
 │   │
 │   ├── prompts/
+│   │   ├── common.ts
 │   │   ├── scout.ts
 │   │   ├── planner.ts
 │   │   ├── worker.ts
@@ -1647,8 +1840,23 @@ pi-workflow/
     ├── context-policy.test.ts
     ├── workflow-auto.test.ts
     ├── recovery.test.ts
+    ├── lock.test.ts
+    ├── commands.test.ts
+    ├── audit-remediation.test.ts
+    ├── progress.test.ts
+    ├── ui-port.test.ts
+    ├── widget.test.ts
+    ├── widget-renderer.test.ts
     └── fake-executor.ts
 ```
+
+This tree reflects the implemented v0.1 layout (synchronized 2026-08-21). Newer files:
+`commands/ui-port.ts` (typed UI port), `commands/widget.ts` + `commands/widget-renderer.ts`
+(live aboveEditor progress widget, see `docs/spec-workflow-output-widget.md`),
+`policies/fork.ts` / `policies/intercom.ts` / `policies/refusal.ts` (audit Findings
+1/13/14), `prompts/common.ts` (autonomy constraint), and the matching test files
+(`audit-remediation.test.ts` covers the §52 findings; `progress.test.ts`,
+`ui-port.test.ts`, `widget.test.ts`, `widget-renderer.test.ts` cover the live progress UI).
 
 Do not create additional abstraction layers unless needed.
 
@@ -1763,12 +1971,17 @@ maintainability
 scope creep
 ```
 
-Final reviewer:
+Final reviewer (node `review-N-final`):
 
 ```text
 verify current final state independently
 focus especially on whether previously reported findings remain
 ```
+
+The final reviewer runs only when Reviewer A and Reviewer B both PASS in that
+round. If either one requests changes, the round transitions directly to
+`fixing` and no final reviewer is launched (regression coverage:
+`test/workflow-auto.test.ts`, the strict-mode final-reviewer tests).
 
 Do not merely ask Reviewer B to critique Reviewer A.
 
@@ -1931,6 +2144,39 @@ Review:
 Run:
 wf_20260821_124500_a81f
 ```
+
+### Live progress surfaces (v0.1)
+
+While any node is running, the command layer provides three live surfaces in addition to
+the milestone summary (full design in `docs/spec-workflow-output-widget.md`):
+
+1. **Working breadcrumb** (`ctx.ui.setWorkingMessage`): the in-flight node as
+   `[agent] action · tool · 8.4s · 142.0k tok`.
+2. **Live widget** (TUI only): a single tree-branch widget registered as
+   `pi-workflow-live` with `aboveEditor` placement. `Ctrl+O` toggles a verbose block;
+   animation is a 500 ms spinner tick that re-renders only when the render key changes;
+   in RPC mode the same pure renderer emits plain `string[]` lines; in print/JSON mode no
+   widget is attempted at all. Example (actual rendered lines):
+
+   ```text
+   ⠋ [pi-workflow] auto (normal) · node: worker · 8.4s · 142.0k tok
+   ├─ ⠋ worker (Executing code implementation...)
+   │  ⎿ tool: edit_file (src/engine/transitions.ts)
+   │  ⎿ Applied patch · Running npm test: 7/7 passed
+   └─ 按 Ctrl+O 展开实时工具输出
+   ```
+
+   The header label is fixed `auto (<mode>)`; the toggle hint is currently Chinese-only.
+3. **Milestone trace lines** (`notify`): each finished node settles into a permanent
+   `✓ [agent] action · 3.2s · 65.2k tok` line, with `⚠️`/`✗` variants and `↳`-indented
+   detail sublines (review findings on REQUEST_CHANGES, failed fix tests).
+
+The engine drives all three through its `WorkflowProgressEvent` stream (`node_start` /
+`node_update` / `node_end`, `src/engine/engine.ts`), mapped by `createProgressNotifier`
+(`src/commands/work.ts`) through the typed `WorkflowUI` port (`src/commands/ui-port.ts`,
+which also suppresses stale-context errors after `/reload`). The widget is created on the
+first node event and disposed in the command handler's cleanup regardless of command
+outcome, so stale progress is never left on screen.
 
 ---
 

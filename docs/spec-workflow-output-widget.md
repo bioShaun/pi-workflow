@@ -1,6 +1,6 @@
 # Spec: Workflow Live Output Widget (aboveEditor)
 
-**Status:** ready-for-agent (local publication; no issue tracker configured)
+**Status:** implemented (2026-08-21; see the Implementation Record at the end of this doc)
 **Date:** 2026-08-21
 **Origin:** Conversation synthesizing `docs/prototype-subagent-output-ui.html` (Variant 1) with API verification against `pi-coding-agent@0.84.2` and `pi-subagents` (`fleet-status.ts`).
 
@@ -36,9 +36,10 @@ Adopt **Variant 1 (Tree-Branch Live Widget)** from
   call with arguments, a one-line stdout preview, and cumulative token count.
 - When a node ends, the widget updates to the next node and a **permanent
   milestone trace** is emitted to the transcript (success / warning / error
-  variants, with ⎿-indented detail sublines) — this already exists as the
+  variants, with ↳-indented detail sublines) — this already exists as the
   `notify` trace path and is preserved unchanged.
-- When the run completes, fails, or is aborted, the widget is cleared and the
+- When the run completes, fails, or is aborted (i.e. when the command handler
+  exits), the widget is disposed in the handler's `finally` block and the
   existing completion summary is emitted.
 - A keyboard toggle (`Ctrl+O`) expands the widget to show verbose detail
   (extended tool output, subagent context info); collapsed is the default.
@@ -98,7 +99,8 @@ into chat history. Durability comes exclusively from milestone trace lines.
     state, so that it is fully unit-testable without a TUI.
 20. As a maintainer, I want the widget to reuse the existing
     `WorkflowProgressEvent` stream (node_start / node_update / node_end), so
-    that no changes to the engine or executor are required.
+    that no new event types are needed — the only engine/executor change is
+    forwarding the subagent's `recentOutput` through `node_update.details`.
 
 ## Implementation Decisions
 
@@ -112,8 +114,11 @@ into chat history. Durability comes exclusively from milestone trace lines.
   once via the component-factory overload of `setWidget`; drive animation with a
   ~500 ms interval that recomputes a render key and only calls
   `tui.requestRender()` when the key changed; unsubscribe terminal input and
-  clear the interval on dispose; guard all deferred UI calls against stale
-  extension contexts (the `isStaleExtensionContextError` pattern).
+  clear the interval on dispose; guard all port-mediated UI calls against stale
+  extension contexts (the `isStaleExtensionContextError` pattern — the widget's
+  own `tui.requestRender()` call is unguarded, and disposal of the widget —
+  timer plus key subscription — happens in the command handler's `finally`
+  block, so a mid-run `/reload` settles when the command finishes).
 - **Rendering is a pure function.** The widget's tree (spinner frame, workflow
   header, active node row, `⎿` tool row, `⎿` stdout row, optional expanded
   detail block, footer hint) is produced by a pure `state → string[]` renderer,
@@ -133,7 +138,8 @@ into chat history. Durability comes exclusively from milestone trace lines.
     stdout?: string;       // one-line preview
     tokens: number;
     expanded: boolean;     // Ctrl+O toggle
-    spinnerFrame: number;
+    spinnerFrame?: number; // implementation: optional, ticks at 500 ms
+    durationMs?: number;   // implementation: optional, shown in the header
   };
   ```
 
@@ -143,16 +149,29 @@ into chat history. Durability comes exclusively from milestone trace lines.
 - **Keyboard toggle via terminal-input subscription**, matching how pi-subagents
   implements its inspector keys; the toggle only flips `expanded` and re-renders.
 - **Mode degradation.** TUI: component factory. RPC (`ctx.hasUI` true, no TUI):
-  `string[]` fallback from the same pure renderer. Print/JSON: widget calls are
-  skipped entirely; `setWorkingMessage` breadcrumb and trace `notify` lines
-  remain the only surfaces.
+  `string[]` fallback from the same pure renderer. Print/JSON
+  (`ctx.hasUI === false`): the port makes no UI calls at all — `notify`,
+  `setWorking`, and `setWidget` are all no-ops, so in that mode there is no
+  widget, no working breadcrumb, and no trace `notify` line through this
+  port (exercised by `test/ui-port.test.ts`).
 - **Correction of the prototype's placement claim.** Documentation and any
   user-facing copy describe the widget as anchored above the editor, not
   "inside the main viewport / chat history".
-- **No engine, executor, gate, or contract changes.** The feature consumes the
-  existing `WorkflowProgressEvent` stream; `event.details.currentTool`,
-  `durationMs`, and `tokens` on `node_update` already carry what the widget
-  needs. If a field proves missing, the port is extended, not the engine.
+- **Engine/executor progress wiring is part of the implementation (revised
+  2026-08-21).** The original estimate assumed the existing `WorkflowProgressEvent`
+  stream already carried everything the widget needs (`event.details.currentTool`,
+  `durationMs`, `tokens`). The one-line stdout preview turned out to need
+  `recentOutput`, so the implementation adds:
+  - `src/agents/pi-subagents-executor.ts` — the delegation-update callback
+    forwards `recentOutput` (with its sibling streaming fields) into the
+    `AgentProgressUpdate` passed to `onUpdate`;
+  - `src/engine/engine.ts` — every node handler (scout, plan, implement,
+    review, fix) maps `up.recentOutput` into `details.recentOutput` on the
+    `node_update` events it emits.
+  No state machine, gate, or contract changes. Regression coverage:
+  `test/progress.test.ts` asserts the adapter forwards `recentOutput` for the
+  active delegation and that every started node's `node_update` event carries
+  it.
 
 ## Testing Decisions
 
@@ -172,10 +191,13 @@ TUI internals, or render-key diffing.
   running with tool, running without tool, expanded vs collapsed, token
   formatting, narrow-width wrapping, spinner frame selection. Prior art: the
   renderer tests in `test/commands.test.ts` (`renderTraceLine` et al.).
-- **Engine-event coverage:** no new engine tests; the existing
-  `test/progress.test.ts` (fake event bus + `FakeAgentExecutor`) already proves
-  the engine emits the events the port consumes. If the port starts consuming a
-  previously unused `details` field, add one case there.
+- **Engine-event coverage:** `test/progress.test.ts` (fake event bus +
+  `FakeAgentExecutor`) proves the engine emits the events the port consumes,
+  including the `recentOutput` regression coverage: the
+  `PiSubagentsExecutor` delegation-update suite asserts the adapter forwards
+  `recentOutput` (and its sibling fields) only for the active delegation, and
+  the end-to-end engine suite asserts every started node's `node_update` event
+  carries `details.recentOutput`.
 - **Not tested:** the TUI shell (interval, `requestRender` diffing, key
   subscription, stale-context cleanup), consistent with the codebase's existing
   treatment of thin integration shells.
@@ -187,8 +209,10 @@ TUI internals, or render-key diffing.
   not support, breaks on narrow terminals, and lacks transcript durability.
   Progressive in-stream cards (Variant 2) contribute only its
   collapse-on-complete behavior, absorbed into the milestone trace design.
-- Changes to the workflow engine, state machine, quality gates, retry/recovery
-  policies, or `pi-subagents` delegation adapter.
+- Changes to the workflow engine, state machine, quality gates, or
+  retry/recovery policies, beyond the `recentOutput` progress wiring in the
+  engine and the `pi-subagents` delegation adapter described in the
+  Implementation Decisions.
 - A settings UI or persistent user preference for the expanded state (the
   toggle is session-local).
 - Mouse interaction, clickable widget regions, or overlay/modal inspectors.
@@ -210,3 +234,51 @@ TUI internals, or render-key diffing.
   re-publish with the `ready-for-agent` triage label.
 - The prototype file `docs/prototype-subagent-output-ui.html` remains the
   visual reference for the tree-branch layout and milestone trace styling.
+
+## Implementation Record (2026-08-21)
+
+Implemented in `src/commands/` with the test coverage promised in the Testing
+Decisions section; commits `1633999`, `eec7258`, `a7aca51`:
+
+- **`src/commands/ui-port.ts`** — `WorkflowUI` typed port (`notify`, `setWorking`,
+  `setWidget`, `onTerminalInput`, `hasUI`, `isRPC`, `getTheme`). `isStaleExtensionContextError`
+  suppresses `context is no longer active` / `session has ended` / `disposed` throws so a
+  `/reload` or session swap can never crash a running workflow. RPC detection: `ctx.mode === "rpc"`.
+- **`src/commands/widget.ts`** — `WorkflowLiveWidget` (key `pi-workflow-live`).
+  `attach()` registers the component factory (TUI) or a `string[]` snapshot (RPC),
+  subscribes terminal input for `Ctrl+O` (`isCtrlO`, ASCII 15), and starts an unref'd
+  500 ms spinner ticker; `dispose()` clears the interval, unsubscribes, and unmounts the
+  widget. Re-renders only when the JSON render key of `{node, agent, action, tool,
+  stdout, tokens, expanded, frame, dur (whole seconds)}` changes.
+- **`src/commands/widget-renderer.ts`** — pure `renderLiveWidget(state, width, theme)`
+  producing the tree-branch lines; 10 braille spinner frames; `formatTokens` / `formatDuration`;
+  every line is truncated to `width` with a trailing `…`.
+- **`src/commands/work.ts`** — `createProgressNotifier(ui, widgetHolder)` maps
+  `WorkflowProgressEvent`s (`node_start` / `node_update` / `node_end`) to the port.
+  The widget is created lazily on the first `node_start` (so all subcommands — `auto`,
+  `plan`, `implement`, `review`, `fix` — get it) and disposed in the handler's `finally`.
+
+Tests: `test/ui-port.test.ts` (port + stale-context guard), `test/widget.test.ts`
+(`Ctrl+O`, render-key diffing, attach/dispose), `test/widget-renderer.test.ts` (pure
+renderer, narrow-width truncation), and the “Work command progress wiring” suite in
+`test/commands.test.ts` (show/update/clear ordering, verdict-driven milestone styling,
+fix-test failure surfacing).
+
+Deviations from this spec (accepted, documented for accuracy):
+
+1. **Header label** — the widget header is fixed `⠋ [pi-workflow] auto (<mode>)`; the
+   “auto” label is not per-subcommand, so a manual `/work implement` still shows `auto (mode)`.
+   (Cosmetic; the node/agent rows carry the real identity.)
+2. **Toggle hint language** — the footer hint is Chinese-only:
+   `按 Ctrl+O 展开实时工具输出` (collapsed) / `按 Ctrl+O 折叠详情` (expanded); no i18n.
+3. **Trace detail marker** — milestone trace detail sublines use `  ↳ ` indentation (not
+   `⎿`); `⎿` appears only on the widget's tool/stdout rows.
+4. **Expanded block** — the verbose block shows `context: fresh · runId: <id>` and, while a
+   tool is in flight, `status: in-flight I/O · mode: <mode>`; it is a compact context
+   block, not a full streaming tool-output pane (the one-line `stdout` preview is still
+   the only live output surface).
+5. **RPC/print degradation** — matches the spec's intent with one mechanical note: RPC mode
+   mounts a single static `string[]` snapshot from `renderRPC()` at `attach()` (there is no
+   TUI to re-render, so later updates change state only); print/JSON mode (`ctx.hasUI ===
+   false`) makes no external UI calls and mounts no visible widget (the notifier
+   still instantiates an internal no-op widget and its 500 ms timer per run).

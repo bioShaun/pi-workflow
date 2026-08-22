@@ -46,11 +46,13 @@ Every review attempt is a new isolated agent invocation (`context: "fresh"`). Re
 ## Features
 
 - **State Machine Orchestration**: Code-driven state transitions with deterministic quality gates.
-- **Autonomous & Step-by-Step Modes**: Run end-to-end with `/work auto`, or step-by-step with `/work plan`, `/work implement`, `/work review`, and `/work fix`.
+- **Autonomous & Step-by-Step Modes**: Run end-to-end with `/work auto`, or step-by-step with `/work plan`, `/work implement`, `/work review`, and `/work fix`. `/work auto` without a mode flag auto-routes the mode from the plan's complexity (low → quick, medium → normal, high/strict triggers → strict).
 - **Quality Gates**: Explicit Plan Gate, Test Gate, Review Gate, and Completion Gate.
-- **Durable Persistence & Recovery**: Atomic state snapshots (`state.json`), append-only event log (`events.jsonl`), and resume from any interruption.
-- **Review Loop Budget**: Configurable bounded review loops (default 3 rounds) to prevent infinite repair loops.
-- **Single Active Run Lock**: Prevents conflicting concurrent runs while preserving full safety.
+- **Live Progress UI**: A tree-branch live widget renders above the editor while any node is running (active node, in-flight tool call, one-line output preview, token/duration counters); each completed node settles into a compact milestone trace line (`✓` with duration and token usage; `⚠️` when a review requests changes; `✗` when a fix node reports failing tests). See [Live Progress](#live-progress) and [`docs/spec-workflow-output-widget.md`](docs/spec-workflow-output-widget.md).
+- **Durable Persistence & Recovery**: Atomic state snapshots (`state.json`), append-only event log (`events.jsonl`), and resume from any interruption (including safe failure for mutating nodes that were interrupted mid-flight).
+- **Review Loop Budget**: Configurable bounded review loops (3 rounds by default, 2 in quick mode) to prevent infinite repair loops; strict mode runs two specialized reviewers (correctness, then tests/quality) per round plus a final fresh reviewer that runs only after both have passed — if either requests changes the round goes straight to fixing with no final reviewer.
+- **Single Active Run Lock**: Prevents conflicting concurrent runs while preserving full safety; terminal runs auto-release the lock.
+- **Autonomy Constraint**: Every node prompt prohibits coordination/intercom tools that would detach a child run; detach-class failures are retried once with an explicit prohibition, and zero-edit worker "refusals" fail the node immediately instead of burning the retry budget.
 - **Repository Safety**: Preserves user changes; never automatically resets, stashes, commits, or pushes without explicit user command.
 
 ---
@@ -70,6 +72,20 @@ Every review attempt is a new isolated agent invocation (`context: "fresh"`). Re
 | `/work list` | List all historical workflow runs |
 | `/work help` | Show usage information |
 
+Bare `/work` shows help. A first argument that is not a recognized subcommand is treated as `/work auto <task>` (the whole line becomes the task).
+
+---
+
+## Live Progress
+
+While a workflow command is running, three surfaces report progress:
+
+1. **Working breadcrumb** — a bottom-of-screen `[agent] action · tool · 8.4s · 142.0k tok` line that follows the in-flight node and its current tool call.
+2. **Live widget (TUI only)** — a single tree-branch widget anchored above the editor (`pi-workflow-live`, `aboveEditor` placement) showing a spinner, the run mode, the active node/agent/action, the in-flight tool with arguments, a one-line stdout preview, and token/duration counters. `Ctrl+O` expands a verbose block (fresh context, run id, and `status: in-flight I/O · mode` while a tool is in flight) and collapses back. The widget is created on the first node event and disposed when the command finishes (success, failure, or abort), so stale progress never lingers. It refreshes on a 500 ms spinner tick and only re-renders when its render key changes. In RPC mode the same pure renderer is installed once as a static plain-text snapshot at attach (subsequent progress then flows through the breadcrumb and milestone surfaces); in print/JSON mode no external UI calls are made and no visible widget is mounted (the notifier still instantiates a no-op internal widget and timer per run).
+3. **Milestone trace lines** — each completed node emits a permanent transcript line, e.g. `✓ [planner] Plan approved (4 steps, low complexity) · 3.2s · 65.2k tok`; a review that requests changes renders as `⚠️` and a fix node with failing tests as `✗`, both with `↳`-indented detail sublines. A failed node execution emits no terminal line — the run failure is surfaced as a workflow error instead.
+
+The engine drives all of this through a typed `WorkflowUI` port (`src/commands/ui-port.ts`) fed by `WorkflowProgressEvent`s (`node_start` / `node_update` / `node_end`); the port also guards every UI call against stale extension contexts after `/reload` or session replacement.
+
 ---
 
 ## Architecture
@@ -82,7 +98,10 @@ pi-workflow/
 │   ├── commands/
 │   │   ├── parser.ts
 │   │   ├── renderer.ts
-│   │   └── work.ts
+│   │   ├── work.ts
+│   │   ├── ui-port.ts
+│   │   ├── widget.ts
+│   │   └── widget-renderer.ts
 │   ├── engine/
 │   │   ├── engine.ts
 │   │   ├── state-machine.ts
@@ -94,11 +113,11 @@ pi-workflow/
 │   │   └── preflight.ts
 │   ├── contracts/
 │   │   ├── workflow.ts
+│   │   ├── scout.ts
 │   │   ├── plan.ts
 │   │   ├── implementation.ts
 │   │   ├── review.ts
-│   │   ├── fix.ts
-│   │   └── scout.ts
+│   │   └── fix.ts
 │   ├── gates/
 │   │   ├── plan-gate.ts
 │   │   ├── test-gate.ts
@@ -107,8 +126,12 @@ pi-workflow/
 │   ├── policies/
 │   │   ├── complexity.ts
 │   │   ├── context.ts
-│   │   └── retry.ts
+│   │   ├── retry.ts
+│   │   ├── fork.ts
+│   │   ├── intercom.ts
+│   │   └── refusal.ts
 │   ├── prompts/
+│   │   ├── common.ts
 │   │   ├── scout.ts
 │   │   ├── planner.ts
 │   │   ├── worker.ts
@@ -128,8 +151,23 @@ pi-workflow/
     ├── recovery.test.ts
     ├── lock.test.ts
     ├── commands.test.ts
+    ├── audit-remediation.test.ts
+    ├── progress.test.ts
+    ├── ui-port.test.ts
+    ├── widget.test.ts
+    ├── widget-renderer.test.ts
     └── fake-executor.ts
 ```
+
+Module notes:
+
+- `src/commands/ui-port.ts` — typed `WorkflowUI` port over `ctx.ui` (notify, working breadcrumb, widget, terminal input); suppresses stale-context errors after `/reload`.
+- `src/commands/widget.ts` — `WorkflowLiveWidget` lifecycle: 500 ms spinner tick, render-key diffing, `Ctrl+O` expand/collapse, RPC `string[]` fallback, disposal.
+- `src/commands/widget-renderer.ts` — pure `renderLiveWidget(state, width, theme)` tree-branch renderer (spinner frames, token/duration formatting, narrow-width truncation).
+- `src/policies/fork.ts` — detects deterministic planner `fork`-unavailable failures; the engine degrades to `fresh` context (spec §52 Finding 1).
+- `src/policies/intercom.ts` — detects intercom-detach child failures and supplies the retry reminder; the engine retries once with an explicit prohibition (§52 Finding 13).
+- `src/policies/refusal.ts` — detects and wraps zero-edit worker completions; the engine fails the node immediately instead of burning the retry budget (§52 Finding 14).
+- `src/prompts/common.ts` — the autonomy constraint appended to every node prompt (prevents coordination-tool detach, §52 Finding 13).
 
 ---
 
