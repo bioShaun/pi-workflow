@@ -89,7 +89,7 @@ export class FakeAgentExecutor implements AgentExecutor {
       };
     }
 
-    if (request.nodeId === "implement") {
+    if (request.nodeId === "implement" || /^ticket-.+-implement$/.test(request.nodeId)) {
       const impl: ImplementationResult = this.defaultResponses.implement ?? {
         summary: "Implemented required changes",
         changedFiles: [{ path: "src/main.ts", change: "Added new functionality" }],
@@ -104,7 +104,7 @@ export class FakeAgentExecutor implements AgentExecutor {
       };
     }
 
-    if (request.nodeId.startsWith("review")) {
+    if (request.nodeId.startsWith("review") || /^ticket-.+-review-\d+$/.test(request.nodeId)) {
       const reviews = this.defaultResponses.review;
       let review: ReviewResult;
       if (reviews && reviews.length > 0) {
@@ -126,7 +126,7 @@ export class FakeAgentExecutor implements AgentExecutor {
       };
     }
 
-    if (request.nodeId.startsWith("fix")) {
+    if (request.nodeId.startsWith("fix") || /^ticket-.+-fix-\d+$/.test(request.nodeId)) {
       const fixes = this.defaultResponses.fix;
       let fix: FixResult;
       if (fixes && fixes.length > 0) {

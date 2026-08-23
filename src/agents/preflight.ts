@@ -67,6 +67,15 @@ const MODULE_LOAD_ERROR_CODES = new Set([
 function isModuleLoadError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const code = (error as NodeJS.ErrnoException).code;
+  if (code === "MODULE_NOT_FOUND") {
+    // Pi's TypeScript loader can lower the dynamic import to CommonJS
+    // `require()`, whose missing-entry error uses MODULE_NOT_FOUND rather
+    // than ERR_MODULE_NOT_FOUND. Only tolerate the requested preflight
+    // entry itself being absent; a missing transitive dependency is a real
+    // installation failure and must remain visible.
+    return error.message.includes(`Cannot find module '${PREFLIGHT_MODULE_SPECIFIER}'`)
+      || error.message.includes(`Cannot find module "${PREFLIGHT_MODULE_SPECIFIER}"`);
+  }
   return typeof code === "string" && MODULE_LOAD_ERROR_CODES.has(code);
 }
 

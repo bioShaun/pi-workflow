@@ -497,6 +497,35 @@ describe("Audit Findings & Remediation (§52)", () => {
       assert.deepEqual(cfg.agents, { scout: "scout", planner: "planner", worker: "worker", reviewer: "reviewer" });
     });
 
+    it("tolerates CommonJS MODULE_NOT_FOUND for the preflight entry module", async () => {
+      const importFail = new Error(
+        "Cannot find module 'pi-subagents/preflight'\nRequire stack:\n- /installed/pi-workflow/src/agents/preflight.ts"
+      );
+      (importFail as NodeJS.ErrnoException).code = "MODULE_NOT_FOUND";
+
+      const result = await validateWorkflowPreflight(cloneConfig(), tmpDir, "normal", async () => {
+        throw importFail;
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.moduleUnavailable, true);
+    });
+
+    it("surfaces CommonJS MODULE_NOT_FOUND from a transitive dependency", async () => {
+      const importFail = new Error(
+        "Cannot find module 'missing-transitive-package'\nRequire stack:\n- /node_modules/pi-subagents/preflight.js"
+      );
+      (importFail as NodeJS.ErrnoException).code = "MODULE_NOT_FOUND";
+
+      const result = await validateWorkflowPreflight(cloneConfig(), tmpDir, "normal", async () => {
+        throw importFail;
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.moduleUnavailable, undefined);
+      assert.match(result.error ?? "", /missing-transitive-package/);
+    });
+
     it("surfaces a genuine resolution failure (fail before modifications)", async () => {
       const fakeModule = {
         resolveSubagentLaunchContract: async (input: { agent: string }) =>

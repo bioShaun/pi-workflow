@@ -31,6 +31,7 @@ export function renderHelp(): string {
     "  /work auto <task> [--quick|--normal|--strict]  Run automated workflow end-to-end",
     "  /work plan <task> [--quick|--normal|--strict]  Generate and persist implementation plan",
     "  /work spec <spec-path> [--quick|--normal|--strict]  Spec-driven flow: implement → review → fix (no planner)",
+    "  /work tickets <spec-path> [--tickets <dir>] [--quick|--normal|--strict]  Run validated tickets sequentially",
     "  /work implement [runId]                        Execute worker for approved plan",
     "  /work review [runId]                           Launch fresh reviewer(s)",
     "  /work fix [runId]                              Execute fix worker for review findings",
@@ -78,6 +79,61 @@ export function renderPlanSummary(plan: PlanResult, run: WorkflowRun): string {
 export function renderStatus(run: WorkflowRun | null): string {
   if (!run) {
     return "pi-workflow: No active or recent workflow found. Start one with `/work auto <task>` or `/work plan <task>`.";
+  }
+
+  if (run.source === "tickets") {
+    const tickets = run.tickets ?? [];
+    const completedIds = new Set(
+      tickets.filter((ticket) => ticket.phase === "ticket_completed").map((ticket) => ticket.id)
+    );
+    const ready = tickets.filter(
+      (ticket) => ticket.phase === "pending"
+        && ticket.blockedBy.every((blocker) => completedIds.has(blocker))
+    );
+    const blocked = tickets.filter(
+      (ticket) => ticket.phase === "pending"
+        && ticket.blockedBy.some((blocker) => !completedIds.has(blocker))
+    );
+    const active = tickets.find((ticket) => ticket.id === run.activeTicketId);
+    const next = active
+      ? `Continue ${active.id} (${active.phase})`
+      : ready[0]
+        ? `Start ${ready[0].id}: ${ready[0].title}`
+        : completedIds.size === tickets.length
+          ? "Run final specification gate"
+          : "No ready frontier";
+    const evidenceTicket = active ?? [...tickets].reverse().find((ticket) =>
+      ticket.red || ticket.verification || ticket.scope
+    );
+    const latestGate = evidenceTicket
+      ? [
+          evidenceTicket.red ? `red=${evidenceTicket.red.status}` : undefined,
+          evidenceTicket.verification ? `green=${evidenceTicket.verification.status}` : undefined,
+          evidenceTicket.scope ? `scope=${evidenceTicket.scope.status}` : undefined,
+        ].filter(Boolean).join(", ")
+      : "pending";
+    const activityAge = active?.lastActivityAt
+      ? Math.max(0, Math.floor((Date.now() - Date.parse(active.lastActivityAt)) / 1000))
+      : undefined;
+    return [
+      `pi-workflow · tickets · ${run.mode}`,
+      `Source: tickets (${run.ticketGraphSource ?? "unknown"})`,
+      ...(run.specPath ? [`Specification: ${run.specPath}`] : []),
+      ...(run.requirement
+        ? [`Requirement: ${run.requirement.sha256.slice(0, 12)} (${run.requirement.characters} chars)`]
+        : []),
+      `Tickets: ${completedIds.size}/${tickets.length} completed`,
+      `Active: ${active ? `${active.id}: ${active.title} (${active.phase})` : "none"}`,
+      `Ready: ${ready.length}`,
+      `Blocked: ${blocked.length}`,
+      `Latest gate: ${latestGate}`,
+      ...(active
+        ? [`Activity: ${active.phase}; last update ${activityAge ?? 0}s ago; ${active.toolCount ?? 0} tools; ${active.tokens ?? 0} tokens`]
+        : []),
+      `Final gate: ${run.finalGateStatus ?? "pending"}`,
+      `Next: ${next}`,
+      ...(run.error ? [`Error [${run.error.code}]: ${run.error.message}`] : []),
+    ].join("\n");
   }
 
   const lines: string[] = [

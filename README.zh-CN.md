@@ -105,6 +105,7 @@ pi list      # 应能看到 pi-workflow
 | `/work auto <task> [--quick\|--normal\|--strict]` | 端到端跑完整个自动化工作流 |
 | `/work plan <task> [--quick\|--normal\|--strict]` | 生成并校验结构化实现计划 |
 | `/work spec <spec-path> [--quick\|--normal\|--strict]` | 规格驱动流程：从一份现成的规格文档直接走 实现 → 审查 → 修复（不派 scout/planner agent） |
+| `/work tickets <spec-path> [--tickets <ticket-dir>] [--quick\|--normal\|--strict]` | Ticket 编排流程：通过校验后的不可变 Ticket 图与红绿验证，顺序执行史诗级规格 |
 | `/work implement [runId]` | 对已批准的计划执行实现 worker |
 | `/work review [runId]` | 启动全新独立的审查者 |
 | `/work fix [runId]` | 针对审查发现执行修复 worker |
@@ -145,6 +146,22 @@ work:
 - 声明 `changes.allow` 后，引擎按初始工作树的精确哈希检查真实变更；越界修改进入修复，工作流自身产物不计入范围，源 spec 与快照不得修改。
 - 预检只要求 `worker` 与 `reviewer`。恢复前校验不可变快照哈希；可恢复的旧式内嵌 spec 只迁移一次，变更发生后无法确认权威需求时安全失败。
 - `/work status` 显示来源、需求短哈希/大小、验证 PASS/FAIL/PENDING 与范围 PASS/FAIL/NOT_DECLARED；完成输出把引擎命令及退出码与 agent 自报检查分开。
+
+### Ticket 编排流程（`/work tickets`）
+
+`/work tickets <spec-path> [--tickets <ticket-dir>]` 将大型/史诗规格拆解为窄而完整的贯穿线（tracer bullet），并在独立的全新上下文中按依赖前沿顺序执行。
+
+```text
+不可变快照 → Ticket 图（导入/生成） → 前沿执行（红 → 绿 → 审查 ↔ 修复） → 全局门禁（Spec 级验证 + 最终审查） → completed
+```
+
+- **显式选择**：单 context 可容纳的原子规格使用 `/work spec`，多 ticket 史诗规格使用 `/work tickets`；引擎绝不隐式猜测或自动切换。
+- **导入 vs 生成**：传 `--tickets <ticket-dir>` 可直接导入预先编写的本地 ticket 目录（例如 `.scratch/<feature>/issues`）；省略时由专用有界 ticketizer agent 生成。二者生成统一的、校验过的不可变 `TicketGraph` 快照。
+- **Skill 独立性**：运行时执行完全由引擎 contracts 驱动，不强依赖 `.agents/skills` 目录；skill 编写的 ticket 仅作为可选导入产物。
+- **强制红绿门禁**：行为型 ticket（`tdd: required`）在实现前必须由引擎观察到符合预期的真实测试失败；非行为型 ticket 必须声明不可变且不可随意扩大的豁免理由（`tdd: exempt`）。
+- **确定性顺序前沿**：所有阻塞项已完成的 pending ticket 构成就绪前沿；引擎按确定性顺序（图顺序优先、ID 其次）逐个执行。
+- **Spec 级全局门禁**：所有 ticket 完成后触发全规格最终门禁，校验需求验收标准全覆盖、全局验证命令、父级范围与全新的最终独立审查。
+- **检查点与恢复**：每个 ticket 阶段流转后持久化检查点；恢复时先行校验快照哈希、工作树基线与 ticket 状态一致性。
 
 ---
 ## 实时进度

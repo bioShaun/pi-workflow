@@ -24,6 +24,10 @@ import {
 } from "../contracts/review.ts";
 import { FIX_RESULT_SCHEMA, validateFixResult, type FixResult } from "../contracts/fix.ts";
 import { SCOUT_RESULT_SCHEMA, validateScoutResult, type ScoutResult } from "../contracts/scout.ts";
+import {
+  RED_AUTHORING_RESULT_SCHEMA,
+  validateRedAuthoringResult,
+} from "../contracts/ticket-execution.ts";
 import type {
   RequirementSnapshot,
   SpecPolicy,
@@ -31,6 +35,16 @@ import type {
   VerificationArtifact,
   ScopeAggregate,
 } from "../contracts/requirement.ts";
+import type { TicketGraph } from "../contracts/tickets.ts";
+import {
+  extractRequirementCriteria,
+  freezeTicketGraph,
+  importTicketGraph,
+  loadFrozenTicketGraph,
+  TicketGraphValidationError,
+} from "../tickets/graph.ts";
+import { selectTicketFrontier, transitionTicket } from "../tickets/lifecycle.ts";
+import { GeneratedTicketGraphAdapter, TicketGenerationError } from "../tickets/adapter.ts";
 import { parseSpecDocument, resolveSpecMode, SpecFormatError } from "../specs/spec-parser.ts";
 import { evaluatePlanGate } from "../gates/plan-gate.ts";
 import { evaluateTestGate } from "../gates/test-gate.ts";
@@ -90,16 +104,21 @@ export type AgentRoles = Record<WorkflowRole, string>;
 
 /** Agent roles a run can actually launch, shared by every entry and recovery path. */
 export function requiredRolesForRun(
-  run: Pick<WorkflowRun, "source" | "mode">
+  run: Pick<WorkflowRun, "source" | "mode" | "ticketGraphSource">
 ): WorkflowRole[] {
   if (run.source === "spec") return ["worker", "reviewer"];
+  if (run.source === "tickets") {
+    return run.ticketGraphSource === "imported"
+      ? ["worker", "reviewer"]
+      : ["planner", "worker", "reviewer"];
+  }
   return run.mode === "quick"
     ? ["planner", "worker", "reviewer"]
     : ["scout", "planner", "worker", "reviewer"];
 }
 
 function requirementPromptForRun(run: WorkflowRun): SpecRequirementPrompt | undefined {
-  if (run.source !== "spec" || !run.requirement || !run.specPolicy) return undefined;
+  if ((run.source !== "spec" && run.source !== "tickets") || !run.requirement || !run.specPolicy) return undefined;
   return {
     snapshot: run.requirement,
     snapshotPath: path.join(
@@ -110,6 +129,63 @@ function requirementPromptForRun(run: WorkflowRun): SpecRequirementPrompt | unde
       run.requirement.artifactPath
     ),
     policy: run.specPolicy,
+  };
+}
+
+interface PreparedSpecSource {
+  content: string;
+  relativePath: string;
+  requirement: RequirementSnapshot;
+  policy: SpecPolicy;
+  mode: WorkflowMode;
+}
+
+async function prepareSpecSource(
+  cwd: string,
+  configuredMode: WorkflowMode,
+  specPath: string,
+  explicitMode?: WorkflowMode
+): Promise<PreparedSpecSource> {
+  const absolutePath = path.isAbsolute(specPath) ? specPath : path.join(cwd, specPath);
+  let content: string;
+  try {
+    content = await fs.readFile(absolutePath, "utf-8");
+  } catch (error) {
+    throw new WorkflowError(
+      "invalid_transition",
+      `Cannot read spec file "${specPath}": ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  if (!content.trim()) {
+    throw new WorkflowError("invalid_transition", `Spec file "${specPath}" is empty`);
+  }
+  const maxCharacters = 100_000;
+  if (content.length > maxCharacters) {
+    throw new WorkflowError(
+      "invalid_transition",
+      `Spec file "${specPath}" is too large (${content.length} characters > ${maxCharacters}). Split it into smaller spec documents.`
+    );
+  }
+  let parsed;
+  try {
+    parsed = parseSpecDocument(content);
+  } catch (error) {
+    if (error instanceof SpecFormatError) throw new WorkflowError("invalid_spec", error.message);
+    throw error;
+  }
+  const relativePath = path.relative(cwd, absolutePath) || specPath;
+  return {
+    content,
+    relativePath,
+    requirement: {
+      kind: "spec",
+      sourcePath: relativePath,
+      artifactPath: "requirement.md",
+      sha256: crypto.createHash("sha256").update(content, "utf8").digest("hex"),
+      characters: content.length,
+    },
+    policy: parsed.policy,
+    mode: resolveSpecMode(explicitMode, parsed.policy.mode, configuredMode),
   };
 }
 
@@ -316,7 +392,9 @@ export class WorkflowEngine {
   }
 
   /** Run preflight for exactly the roles selected from the run source. */
-  private async preflightForRun(run: Pick<WorkflowRun, "source" | "mode">): Promise<AgentRoles> {
+  private async preflightForRun(
+    run: Pick<WorkflowRun, "source" | "mode" | "ticketGraphSource">
+  ): Promise<AgentRoles> {
     const requiredRoles = requiredRolesForRun(run);
     if (this.preflightOverride) {
       return this.preflightOverride(run.mode, requiredRoles);
@@ -341,11 +419,12 @@ export class WorkflowEngine {
     initialMode: WorkflowMode,
     autoRouted: boolean,
     origin?: {
-      source: "auto" | "plan" | "spec";
+      source: "auto" | "plan" | "spec" | "tickets";
       specPath?: string;
       specPolicy?: SpecPolicy;
       requirement?: RequirementSnapshot;
       requirementContent?: string;
+      ticketGraphSource?: "imported" | "generated";
     }
   ): Promise<WorkflowRun> {
     const runId = generateWorkflowRunId();
@@ -382,13 +461,14 @@ export class WorkflowEngine {
       specPath: origin?.specPath,
       specPolicy: origin?.specPolicy,
       requirement: origin?.requirement,
+      ticketGraphSource: origin?.ticketGraphSource,
     };
 
     await saveWorkflowRun(this.baseDir, run);
     await appendWorkflowEvent(this.baseDir, run.id, {
       event: "workflow.created",
       state: "created",
-      details: origin?.source === "spec"
+      details: origin?.source === "spec" || origin?.source === "tickets"
         ? {
             mode: run.mode,
             autoRouted,
@@ -488,7 +568,7 @@ export class WorkflowEngine {
     return true;
   }
   private async ensureSpecRequirement(run: WorkflowRun): Promise<WorkflowRun> {
-    if (run.source !== "spec") return run;
+    if (run.source !== "spec" && run.source !== "tickets") return run;
 
     if (run.requirement) {
       let content: string;
@@ -571,6 +651,52 @@ export class WorkflowEngine {
       details: { requirement: run.requirement, policy: run.specPolicy },
     });
     return run;
+  }
+
+  private async validateTicketResume(run: WorkflowRun): Promise<TicketGraph> {
+    if (run.source !== "tickets" || !run.baseline.files || !run.tickets) {
+      throw new WorkflowError("ticket_graph_corrupt", "Ticketed run lacks source, baseline, or runtime state");
+    }
+    await this.ensureSpecRequirement(run);
+    let graph: TicketGraph;
+    try {
+      graph = await loadFrozenTicketGraph(this.baseDir, run);
+    } catch (error) {
+      throw new WorkflowError(
+        "ticket_graph_corrupt",
+        error instanceof Error ? error.message : String(error),
+        { details: error }
+      );
+    }
+    if (graph.tickets.length !== run.tickets.length) {
+      throw new WorkflowError("ticket_graph_corrupt", "Ticket runtime count differs from immutable graph");
+    }
+    for (const state of run.tickets) {
+      const definition = graph.tickets.find((ticket) => ticket.id === state.id);
+      if (!definition) {
+        throw new WorkflowError("ticket_graph_corrupt", `Unknown runtime ticket ${state.id}`);
+      }
+      if (!["pending", "ticket_completed"].includes(state.phase) && !state.checkpoint?.files) {
+        throw new WorkflowError("ticket_graph_corrupt", `Ticket ${state.id} is missing its phase checkpoint`);
+      }
+      if (state.phase === "ticket_completed" && (
+        state.verification?.status !== "passed"
+        || state.scope?.status !== "passed"
+        || state.review?.verdict !== "PASS"
+        || (definition.tdd.policy === "required" && state.red?.status !== "passed")
+      )) {
+        throw new WorkflowError("ticket_graph_corrupt", `Completed ticket ${state.id} has invalid evidence`);
+      }
+      if (state.verification && (
+        state.verification.total !== definition.verification.length
+        || state.verification.commands.some(
+          (result, index) => result.command !== definition.verification[index]?.command
+        )
+      )) {
+        throw new WorkflowError("ticket_graph_corrupt", `Ticket ${state.id} verification identity is invalid`);
+      }
+    }
+    return graph;
   }
 
   private async loadVerificationArtifact(
@@ -700,6 +826,627 @@ export class WorkflowEngine {
       details: { ...aggregate },
     });
     return artifact.status === "passed";
+  }
+
+  private async runTicketVerification(
+    run: WorkflowRun,
+    ticketId: string,
+    commands: TicketGraph["tickets"][number]["verification"]
+  ): Promise<VerificationAggregate> {
+    const results: VerificationArtifact["commands"] = [];
+    for (const requirement of commands) {
+      try {
+        results.push(await this.verificationRunner.run({
+          command: requirement.command,
+          cwd: this.cwd,
+        }));
+      } catch (error) {
+        throw new WorkflowError(
+          "verification_failed",
+          `Ticket ${ticketId} verification could not execute ${requirement.command}`,
+          { details: error }
+        );
+      }
+    }
+    const passed = results.filter((result) => result.status === "passed").length;
+    const artifact: VerificationArtifact = {
+      label: ticketId,
+      status: passed === results.length && results.length > 0 ? "passed" : "failed",
+      passed,
+      total: results.length,
+      completedAt: new Date().toISOString(),
+      commands: results,
+    };
+    await saveArtifact(this.baseDir, run.id, `tickets/${ticketId}/green.json`, artifact);
+    const aggregate: VerificationAggregate = {
+      label: artifact.label,
+      status: artifact.status,
+      passed: artifact.passed,
+      total: artifact.total,
+      commands: artifact.commands.map((result) => ({
+        command: result.command,
+        status: result.status,
+        exitCode: result.exitCode,
+      })),
+      completedAt: artifact.completedAt,
+    };
+    await appendWorkflowEvent(this.baseDir, run.id, {
+      event: "ticket.green_completed",
+      state: run.state,
+      node: ticketId,
+      details: { ticketId, ...aggregate },
+    });
+    return aggregate;
+  }
+
+  private async executeTicket(
+    run: WorkflowRun,
+    graph: TicketGraph,
+    ticket: TicketGraph["tickets"][number],
+    agents: AgentRoles
+  ): Promise<WorkflowRun> {
+    if (ticket.tdd.policy === "exempt" && ticket.kind === "behavioral") {
+      throw new WorkflowError(
+        "invalid_ticket_graph",
+        `Behavioral ticket ${ticket.id} cannot use a TDD exemption`
+      );
+    }
+    const index = run.tickets?.findIndex((state) => state.id === ticket.id) ?? -1;
+    if (index < 0 || !run.tickets || !run.requirement) {
+      throw new WorkflowError("ticket_graph_corrupt", `Missing runtime state for ticket ${ticket.id}`);
+    }
+    let state = run.tickets[index];
+    const checkpoint = await captureRepositoryBaseline(this.cwd);
+    state.checkpoint = checkpoint;
+    run.activeTicketId = ticket.id;
+
+    if (ticket.tdd.policy === "required") {
+      state = transitionTicket(state, "red_authoring");
+      run.tickets[index] = state;
+      await saveWorkflowRun(this.baseDir, run);
+      const redResult = await this.executor.execute({
+        workflowRunId: run.id,
+        nodeId: `ticket-${ticket.id}-red`,
+        agent: agents.worker,
+        task: [
+          `Author the smallest failing behavioral test for immutable ticket ${ticket.id} in ticket-plan.json.`,
+          `Requirement snapshot: ${requirementPromptForRun(run)?.snapshotPath}`,
+          `Testing seam: ${ticket.testingSeam}`,
+          `Red command: ${ticket.redCommand}`,
+          "Do not implement production behavior. Return bounded expected failure evidence.",
+        ].join("\n"),
+        context: "fresh",
+        cwd: this.cwd,
+        schema: RED_AUTHORING_RESULT_SCHEMA,
+        timeoutMs: 180_000,
+      });
+      if (redResult.status !== "completed") {
+        throw new WorkflowError(
+          redResult.status === "timed_out" ? "agent_budget_exhausted" : "invalid_red_evidence",
+          redResult.error ?? `Red authoring failed for ${ticket.id}`
+        );
+      }
+      const validatedRed = validateRedAuthoringResult(redResult.result);
+      if (!validatedRed.ok) {
+        throw new WorkflowError("invalid_red_evidence", validatedRed.error);
+      }
+      state = transitionTicket(state, "red_verification");
+      const redScope = await compareRepositoryScope({
+        cwd: this.cwd,
+        baseline: checkpoint,
+        allowedChanges: ticket.allowedChanges,
+        requirement: run.requirement,
+        label: `${ticket.id}-red`,
+      });
+      const changedTests = new Set(validatedRed.data.changedTestPaths);
+      if (
+        redScope.status !== "passed"
+        || (!validatedRed.data.existingReproduction
+          && (redScope.changed.length === 0 || redScope.changed.some((filePath) => !changedTests.has(filePath))))
+      ) {
+        throw new WorkflowError(
+          "invalid_red_evidence",
+          `Red phase for ${ticket.id} changed paths outside its declared test evidence`
+        );
+      }
+      let execution;
+      try {
+        execution = await this.verificationRunner.run({
+          command: ticket.redCommand!,
+          cwd: this.cwd,
+        });
+      } catch (error) {
+        throw new WorkflowError("invalid_red_evidence", `Red command infrastructure failed for ${ticket.id}`, {
+          details: error,
+        });
+      }
+      const output = `${execution.stdout}\n${execution.stderr}`;
+      const invalidFailure = /syntax\s*error|cannot find module|module not found|missing dependenc|timed?\s*out/i.test(output);
+      if (
+        execution.status !== "failed"
+        || execution.exitCode === 0
+        || invalidFailure
+        || !output.toLowerCase().includes(validatedRed.data.expectedFailure.toLowerCase())
+      ) {
+        throw new WorkflowError(
+          "invalid_red_evidence",
+          `Red command for ${ticket.id} did not fail for the bounded expected reason`
+        );
+      }
+      state.red = {
+        command: execution.command,
+        exitCode: execution.exitCode,
+        expectedFailure: validatedRed.data.expectedFailure,
+        changedTestPaths: validatedRed.data.changedTestPaths,
+        existingReproduction: validatedRed.data.existingReproduction,
+        status: "passed",
+      };
+      await saveArtifact(this.baseDir, run.id, `tickets/${ticket.id}/red.json`, {
+        ...state.red,
+        execution,
+      });
+      await appendWorkflowEvent(this.baseDir, run.id, {
+        event: "ticket.red_completed",
+        state: run.state,
+        node: ticket.id,
+        details: { ticketId: ticket.id, ...state.red },
+      });
+    }
+
+    state = transitionTicket(state, "implementing");
+    run.tickets[index] = state;
+    await saveWorkflowRun(this.baseDir, run);
+    await appendWorkflowEvent(this.baseDir, run.id, {
+      event: "ticket.phase_changed",
+      state: run.state,
+      node: ticket.id,
+      details: { ticketId: ticket.id, phase: state.phase, tdd: ticket.tdd.policy },
+    });
+
+    const plan: PlanResult = {
+      summary: `${ticket.id}: ${ticket.title}`,
+      understanding: `${ticket.capability}\nAcceptance: ${ticket.acceptanceCriteria.join("; ")}\nImmutable ticket: ticket-plan.json#${ticket.id}`,
+      files: (ticket.allowedChanges ?? []).map((filePath) => ({
+        path: filePath,
+        purpose: `Allowed by ticket ${ticket.id}`,
+        action: "modify" as const,
+      })),
+      steps: [{ id: "1", description: `Implement only ${ticket.id}: ${ticket.capability}` }],
+      tests: ticket.verification.map((requirement) => ({
+        command: requirement.command,
+        description: requirement.command,
+        required: true,
+      })),
+      risks: [],
+      assumptions: ticket.tdd.policy === "exempt"
+        ? [`TDD exemption: ${ticket.tdd.reason}`]
+        : [`Engine-observed red evidence: ${state.red?.expectedFailure}`],
+      complexity: "low",
+      requiresSecondReviewer: false,
+    };
+    const implementationResult = await this.executor.execute<ImplementationResult>({
+      workflowRunId: run.id,
+      nodeId: `ticket-${ticket.id}-implement`,
+      agent: agents.worker,
+      task: buildWorkerPrompt({
+        task: run.request,
+        plan,
+        requirement: requirementPromptForRun(run),
+      }),
+      context: "fresh",
+      cwd: this.cwd,
+      schema: IMPLEMENTATION_RESULT_SCHEMA,
+      timeoutMs: 300_000,
+    });
+    if (implementationResult.status !== "completed") {
+      throw new WorkflowError(
+        implementationResult.status === "timed_out" ? "agent_budget_exhausted" : "agent_execution_failed",
+        implementationResult.error ?? `Ticket ${ticket.id} implementation failed`
+      );
+    }
+    const validatedImplementation = validateImplementationResult(implementationResult.result);
+    if (!validatedImplementation.ok) {
+      throw new WorkflowError("invalid_structured_output", validatedImplementation.error);
+    }
+    await saveArtifact(
+      this.baseDir,
+      run.id,
+      `tickets/${ticket.id}/implementation.json`,
+      validatedImplementation.data
+    );
+
+    state = transitionTicket(state, "green_verification");
+    state.verification = await this.runTicketVerification(run, ticket.id, ticket.verification);
+    if (state.verification.status !== "passed") {
+      throw new WorkflowError(
+        "ticket_verification_failed",
+        `Ticket ${ticket.id} verification failed`
+      );
+    }
+    const scopeArtifact = await compareRepositoryScope({
+      cwd: this.cwd,
+      baseline: checkpoint,
+      allowedChanges: ticket.allowedChanges,
+      requirement: run.requirement,
+      label: ticket.id,
+    });
+    state.scope = {
+      label: scopeArtifact.label,
+      status: scopeArtifact.status,
+      changed: scopeArtifact.changed,
+      outOfScope: scopeArtifact.outOfScope,
+      completedAt: scopeArtifact.completedAt,
+    };
+    await saveArtifact(this.baseDir, run.id, `tickets/${ticket.id}/scope.json`, scopeArtifact);
+    if (scopeArtifact.status !== "passed") {
+      throw new WorkflowError(
+        "ticket_scope_violation",
+        `Ticket ${ticket.id} changed out-of-scope paths: ${scopeArtifact.outOfScope.join(", ")}`
+      );
+    }
+
+    state = transitionTicket(state, "ticket_review");
+    run.tickets[index] = state;
+    await saveWorkflowRun(this.baseDir, run);
+    let reviewRound = 1;
+    let latestFix: FixResult | undefined;
+    let review = await this.runReviewer(
+      run,
+      agents,
+      `ticket-${ticket.id}-review-${reviewRound}`,
+      buildReviewerPrompt({
+        task: run.request,
+        plan,
+        implementation: validatedImplementation.data,
+        specialization: "general",
+        round: reviewRound,
+        requirement: requirementPromptForRun(run),
+      }) + `\n\n## Deterministic Ticket Evidence\n${JSON.stringify({ red: state.red, green: state.verification, scope: state.scope })}`,
+      `${ticket.id}-reviewer`,
+      reviewRound
+    );
+
+    while (review.verdict !== "PASS") {
+      state.review = review;
+      state.reviewRound = reviewRound;
+      if (reviewRound >= run.maxReviewRounds) {
+        state = transitionTicket(state, "ticket_failed");
+        run.tickets[index] = state;
+        await saveWorkflowRun(this.baseDir, run);
+        throw new WorkflowError(
+          "ticket_review_budget_exhausted",
+          `Ticket ${ticket.id} review still has findings after ${reviewRound} rounds`
+        );
+      }
+
+      state = transitionTicket(state, "ticket_fix");
+      state.fixRound++;
+      run.tickets[index] = state;
+      await saveWorkflowRun(this.baseDir, run);
+      const fixResult = await this.executor.execute<FixResult>({
+        workflowRunId: run.id,
+        nodeId: `ticket-${ticket.id}-fix-${state.fixRound}`,
+        agent: agents.worker,
+        task: buildFixerPrompt({
+          task: run.request,
+          plan,
+          findings: review.findings,
+          round: state.fixRound,
+          requirement: requirementPromptForRun(run),
+        }),
+        context: "fresh",
+        cwd: this.cwd,
+        schema: FIX_RESULT_SCHEMA,
+        timeoutMs: 300_000,
+      });
+      if (fixResult.status !== "completed") {
+        throw new WorkflowError(
+          fixResult.status === "timed_out" ? "agent_budget_exhausted" : "agent_execution_failed",
+          fixResult.error ?? `Ticket ${ticket.id} fixer failed`
+        );
+      }
+      const validatedFix = validateFixResult(fixResult.result);
+      if (!validatedFix.ok) {
+        throw new WorkflowError("invalid_structured_output", validatedFix.error);
+      }
+      latestFix = validatedFix.data;
+      await saveArtifact(
+        this.baseDir,
+        run.id,
+        `tickets/${ticket.id}/fix-${state.fixRound}.json`,
+        latestFix
+      );
+
+      state = transitionTicket(state, "green_verification");
+      state.verification = await this.runTicketVerification(run, ticket.id, ticket.verification);
+      if (state.verification.status !== "passed") {
+        throw new WorkflowError("ticket_verification_failed", `Ticket ${ticket.id} verification failed after fix`);
+      }
+      const fixedScope = await compareRepositoryScope({
+        cwd: this.cwd,
+        baseline: checkpoint,
+        allowedChanges: ticket.allowedChanges,
+        requirement: run.requirement,
+        label: `${ticket.id}-fix-${state.fixRound}`,
+      });
+      state.scope = {
+        label: fixedScope.label,
+        status: fixedScope.status,
+        changed: fixedScope.changed,
+        outOfScope: fixedScope.outOfScope,
+        completedAt: fixedScope.completedAt,
+      };
+      await saveArtifact(this.baseDir, run.id, `tickets/${ticket.id}/scope-fix-${state.fixRound}.json`, fixedScope);
+      if (fixedScope.status !== "passed") {
+        throw new WorkflowError("ticket_scope_violation", `Ticket ${ticket.id} scope failed after fix`);
+      }
+
+      state = transitionTicket(state, "ticket_review");
+      run.tickets[index] = state;
+      await saveWorkflowRun(this.baseDir, run);
+      reviewRound++;
+      review = await this.runReviewer(
+        run,
+        agents,
+        `ticket-${ticket.id}-review-${reviewRound}`,
+        buildReviewerPrompt({
+          task: run.request,
+          plan,
+          implementation: validatedImplementation.data,
+          latestFix,
+          previousFindings: state.review?.findings,
+          specialization: "general",
+          round: reviewRound,
+          requirement: requirementPromptForRun(run),
+        }) + `\n\n## Deterministic Ticket Evidence\n${JSON.stringify({ red: state.red, green: state.verification, scope: state.scope })}`,
+        `${ticket.id}-reviewer`,
+        reviewRound
+      );
+    }
+
+    state.review = review;
+    state.reviewRound = reviewRound;
+    state = transitionTicket(state, "ticket_completed");
+    state.completedCheckpoint = await captureRepositoryBaseline(this.cwd);
+    run.tickets[index] = state;
+    run.activeTicketId = undefined;
+    await saveWorkflowRun(this.baseDir, run);
+    await appendWorkflowEvent(this.baseDir, run.id, {
+      event: "ticket.completed",
+      state: run.state,
+      node: ticket.id,
+      details: {
+        ticketId: ticket.id,
+        verification: state.verification,
+        scope: state.scope,
+        review: { verdict: review.verdict, confidence: review.confidence },
+      },
+    });
+    return run;
+  }
+
+  private async executeTicketFrontier(run: WorkflowRun, agents: AgentRoles): Promise<WorkflowRun> {
+    const graph = await loadFrozenTicketGraph(this.baseDir, run);
+    while (run.state === "executing_tickets") {
+      const frontier = selectTicketFrontier(graph, run.tickets ?? []);
+
+      await appendWorkflowEvent(this.baseDir, run.id, {
+        event: "ticket.frontier_computed",
+        state: run.state,
+        node: "ticket-frontier",
+        details: { ready: frontier.map((ticket) => ticket.id) },
+      });
+      if (frontier.length === 0) {
+        if (run.tickets?.every((ticket) => ticket.phase === "ticket_completed")) {
+          run = await this.stateMachine.transition(run, "finalizing", {
+            node: "final-gate",
+            reason: "All tickets completed",
+          });
+          return await this.executeTicketFinalGate(run, graph, agents);
+        }
+        throw new WorkflowError("no_ready_frontier", "No ready ticket exists while work remains");
+      }
+
+      const ticket = frontier[0];
+      await appendWorkflowEvent(this.baseDir, run.id, {
+        event: "ticket.started",
+        state: run.state,
+        node: ticket.id,
+        details: { ticketId: ticket.id },
+      });
+      try {
+        run = await this.executeTicket(run, graph, ticket, agents);
+      } catch (error) {
+        const index = run.tickets?.findIndex((state) => state.id === ticket.id) ?? -1;
+        if (index >= 0 && run.tickets) {
+          run.tickets[index] = {
+            ...run.tickets[index],
+            phase: "ticket_failed",
+          };
+          run.activeTicketId = ticket.id;
+          await saveWorkflowRun(this.baseDir, run);
+          await appendWorkflowEvent(this.baseDir, run.id, {
+            event: "ticket.failed",
+            state: run.state,
+            node: ticket.id,
+            details: {
+              ticketId: ticket.id,
+              message: error instanceof Error ? error.message : String(error),
+            },
+          });
+        }
+        throw error;
+      }
+      const current = run.tickets?.find((state) => state.id === ticket.id);
+      if (current?.phase !== "ticket_completed") return run;
+    }
+    return run;
+  }
+  private async executeTicketFinalGate(
+    run: WorkflowRun,
+    graph: TicketGraph,
+    agents: AgentRoles
+  ): Promise<WorkflowRun> {
+    if (!run.requirement || !run.tickets) {
+      throw new WorkflowError("ticket_graph_corrupt", "Final gate lacks requirement or ticket state");
+    }
+    const invalidTicket = run.tickets.find((ticket) =>
+      ticket.phase !== "ticket_completed"
+      || ticket.verification?.status !== "passed"
+      || ticket.scope?.status !== "passed"
+      || ticket.review?.verdict !== "PASS"
+      || (graph.tickets.find((definition) => definition.id === ticket.id)?.tdd.policy === "required"
+        && ticket.red?.status !== "passed")
+    );
+    const uncovered = Object.entries(graph.coverage).filter(([, owners]) => owners.length === 0);
+    if (invalidTicket || uncovered.length > 0) {
+      throw new WorkflowError(
+        uncovered.length > 0 ? "requirement_coverage_gap" : "final_verification_failed",
+        invalidTicket
+          ? `Ticket ${invalidTicket.id} lacks complete deterministic evidence`
+          : `Uncovered requirement criteria: ${uncovered.map(([criterion]) => criterion).join(", ")}`
+      );
+    }
+
+    const commandByText = new Map<string, { command: string; required: true }>();
+    for (const requirement of [
+      ...graph.finalGate.verification,
+      ...(run.specPolicy?.verification ?? []),
+    ]) {
+      commandByText.set(requirement.command, { command: requirement.command, required: true });
+    }
+    const finalCommands = [...commandByText.values()];
+    const plan: PlanResult = {
+      summary: "Final cross-ticket integration against the immutable specification",
+      understanding: "Evaluate complete requirement coverage and cross-ticket behavior without reopening valid ticket history.",
+      files: [],
+      steps: [{ id: "1", description: "Verify the complete immutable specification" }],
+      tests: finalCommands.map((requirement) => ({
+        command: requirement.command,
+        description: requirement.command,
+        required: true,
+      })),
+      risks: [],
+      assumptions: [],
+      complexity: "high",
+      requiresSecondReviewer: true,
+    };
+
+    for (let round = 1; round <= run.maxReviewRounds; round++) {
+      const verification = await this.runTicketVerification(run, "final", finalCommands);
+      run.verification = verification;
+      const finalScope = await compareRepositoryScope({
+        cwd: this.cwd,
+        baseline: run.baseline,
+        allowedChanges: run.specPolicy?.allowedChanges,
+        requirement: run.requirement,
+        label: `final-${round}`,
+      });
+      run.scopeGate = {
+        label: finalScope.label,
+        status: finalScope.status,
+        changed: finalScope.changed,
+        outOfScope: finalScope.outOfScope,
+        completedAt: finalScope.completedAt,
+      };
+      await saveArtifact(this.baseDir, run.id, `final/scope-${round}.json`, finalScope);
+
+      let review: ReviewResult | undefined;
+      if (verification.status === "passed" && finalScope.status === "passed") {
+        const coverageSummary = Object.entries(graph.coverage).map(
+          ([criterion, owners]) => `${criterion}: ${owners.join(", ")}`
+        );
+        review = await this.runReviewer(
+          run,
+          agents,
+          `ticket-final-review-${round}`,
+          buildReviewerPrompt({
+            task: run.request,
+            plan,
+            specialization: "final",
+            round,
+            requirement: requirementPromptForRun(run),
+          }) + `\n\n## Coverage Matrix\n${coverageSummary.join("\n")}\n\n## Ticket Outcomes\n${JSON.stringify(run.tickets.map((ticket) => ({ id: ticket.id, verification: ticket.verification?.status, scope: ticket.scope?.status, review: ticket.review?.verdict })))}`,
+          "ticket-final-reviewer",
+          round
+        );
+      }
+
+      if (verification.status === "passed" && finalScope.status === "passed" && review?.verdict === "PASS") {
+        run.reviews.push(review);
+        run.finalGateStatus = "passed";
+        await saveArtifact(this.baseDir, run.id, "final/ticket-gate.json", {
+          coverage: graph.coverage,
+          verification,
+          scope: run.scopeGate,
+          review: { verdict: review.verdict, confidence: review.confidence },
+        });
+        await saveWorkflowRun(this.baseDir, run);
+        await appendWorkflowEvent(this.baseDir, run.id, {
+          event: "ticket.final_completed",
+          state: run.state,
+          node: "final-gate",
+          details: {
+            verification,
+            scope: run.scopeGate,
+            review: { verdict: review.verdict, confidence: review.confidence },
+          },
+        });
+        const completed = await this.stateMachine.transition(run, "completed", {
+          node: "final-gate",
+          reason: "Ticket coverage, final verification, scope, and review passed",
+        });
+        await this.releaseRunLock(completed.id);
+        return completed;
+      }
+
+      if (round === run.maxReviewRounds) {
+        run.finalGateStatus = "failed";
+        await saveWorkflowRun(this.baseDir, run);
+        throw new WorkflowError(
+          review?.verdict === "REQUEST_CHANGES"
+            ? "final_review_budget_exhausted"
+            : "final_verification_failed",
+          `Final ticket gate did not pass after ${round} round(s)`
+        );
+      }
+
+      const fixResult = await this.executor.execute<FixResult>({
+        workflowRunId: run.id,
+        nodeId: `ticket-final-fix-${round}`,
+        agent: agents.worker,
+        task: buildFixerPrompt({
+          task: run.request,
+          plan,
+          findings: review?.findings ?? [],
+          failedTests: verification.commands
+            .filter((result) => result.status === "failed")
+            .map((result) => ({
+              command: result.command,
+              status: "failed" as const,
+              summary: `exit ${result.exitCode}`,
+              exitCode: result.exitCode,
+            })),
+          outOfScopePaths: finalScope.outOfScope,
+          round,
+          requirement: requirementPromptForRun(run),
+        }),
+        context: "fresh",
+        cwd: this.cwd,
+        schema: FIX_RESULT_SCHEMA,
+        timeoutMs: 300_000,
+      });
+      if (fixResult.status !== "completed") {
+        throw new WorkflowError(
+          fixResult.status === "timed_out" ? "agent_budget_exhausted" : "agent_execution_failed",
+          fixResult.error ?? "Final integration fixer failed"
+        );
+      }
+      const validated = validateFixResult(fixResult.result);
+      if (!validated.ok) throw new WorkflowError("invalid_structured_output", validated.error);
+      await saveArtifact(this.baseDir, run.id, `final/fix-${round}.json`, validated.data);
+    }
+    throw new WorkflowError("final_verification_failed", "Final ticket gate ended without evidence");
   }
 
   /**
@@ -1226,6 +1973,7 @@ export class WorkflowEngine {
           task: currentPrompt,
           cwd: this.cwd,
           schema: REVIEW_RESULT_SCHEMA,
+          timeoutMs: 180_000,
           onUpdate: (up) =>
             this.forwardNodeProgress(
               run,
@@ -1786,53 +2534,18 @@ export class WorkflowEngine {
    * bounded implement → review → fix loop as /work auto.
    */
   async startSpec(specPath: string, options?: { mode?: WorkflowMode }): Promise<WorkflowRun> {
-    const absoluteSpecPath = path.isAbsolute(specPath) ? specPath : path.join(this.cwd, specPath);
-    let specContent: string;
-    try {
-      specContent = await fs.readFile(absoluteSpecPath, "utf-8");
-    } catch (error) {
-      throw new WorkflowError(
-        "invalid_transition",
-        `Cannot read spec file "${specPath}": ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-    if (!specContent.trim()) {
-      throw new WorkflowError("invalid_transition", `Spec file "${specPath}" is empty`);
-    }
-    // Keep a bounded source document even though prompts reference the
-    // immutable artifact instead of embedding it.
-    const SPEC_MAX_CHARS = 100_000;
-    if (specContent.length > SPEC_MAX_CHARS) {
-      throw new WorkflowError(
-        "invalid_transition",
-        `Spec file "${specPath}" is too large (${specContent.length} characters > ${SPEC_MAX_CHARS}). ` +
-          `Split it into smaller spec documents and run one /work spec per document.`
-      );
-    }
-
-    let parsedSpec;
-    try {
-      parsedSpec = parseSpecDocument(specContent);
-    } catch (error) {
-      if (error instanceof SpecFormatError) {
-        throw new WorkflowError("invalid_spec", error.message);
-      }
-      throw error;
-    }
-    const relativeSpecPath = path.relative(this.cwd, absoluteSpecPath) || specPath;
-    const requirement: RequirementSnapshot = {
-      kind: "spec",
-      sourcePath: relativeSpecPath,
-      artifactPath: "requirement.md",
-      sha256: crypto.createHash("sha256").update(specContent, "utf8").digest("hex"),
-      characters: specContent.length,
-    };
-    const mode = resolveSpecMode(options?.mode, parsedSpec.policy.mode, this.config.defaultMode);
-    // The spec flow runs only the worker and reviewer nodes; planner/scout
-    // agents are not required to be configured at all (§29: fail before
-    // modifications, on exactly the roles this flow launches).
+    const prepared = await prepareSpecSource(
+      this.cwd,
+      this.config.defaultMode,
+      specPath,
+      options?.mode
+    );
+    const specContent = prepared.content;
+    const relativeSpecPath = prepared.relativePath;
+    const parsedSpec = { policy: prepared.policy };
+    const requirement = prepared.requirement;
+    const mode = prepared.mode;
     const agents = await this.preflightForRun({ mode, source: "spec" });
-
     const request = `Spec-driven workflow from immutable requirement snapshot for "${relativeSpecPath}".`;
 
     let run = await this.createRun(request, mode, false, {
@@ -1869,6 +2582,124 @@ export class WorkflowEngine {
       return await this.markRunFailed(run, error);
     }
   }
+
+  async startTickets(
+    specPath: string,
+    options?: { mode?: WorkflowMode; ticketDir?: string; prepareOnly?: boolean }
+  ): Promise<WorkflowRun> {
+    const prepared = await prepareSpecSource(
+      this.cwd,
+      this.config.defaultMode,
+      specPath,
+      options?.mode
+    );
+    const requirementCriteria = extractRequirementCriteria(prepared.content);
+    const graphSource = options?.ticketDir ? "imported" as const : "generated" as const;
+    let graph: TicketGraph | undefined;
+    if (options?.ticketDir) {
+      try {
+        graph = await importTicketGraph({
+          ticketDir: path.resolve(this.cwd, options.ticketDir),
+          requirement: prepared.requirement,
+          requirementCriteria,
+        });
+      } catch (error) {
+        if (error instanceof TicketGraphValidationError) {
+          throw new WorkflowError("invalid_ticket_graph", error.message, { details: error.issues });
+        }
+        throw error;
+      }
+    }
+
+    const agents = await this.preflightForRun({
+      mode: prepared.mode,
+      source: "tickets",
+      ticketGraphSource: graphSource,
+    });
+    let run = await this.createRun(
+      `Ticket-orchestrated workflow for "${prepared.relativePath}".`,
+      prepared.mode,
+      false,
+      {
+        source: "tickets",
+        specPath: prepared.relativePath,
+        specPolicy: prepared.policy,
+        requirement: prepared.requirement,
+        requirementContent: prepared.content,
+        ticketGraphSource: graphSource,
+      }
+    );
+
+    try {
+      run = await this.stateMachine.transition(run, "ticketing", {
+        node: "ticket-graph",
+        reason: graph ? "Valid imported ticket graph selected" : "Generating ticket graph",
+      });
+      if (!graph) {
+        const adapter = new GeneratedTicketGraphAdapter(
+          this.executor,
+          agents.planner,
+          this.cwd,
+          run.id
+        );
+        graph = await adapter.obtain({
+          requirement: prepared.requirement,
+          requirementPath: path.join(
+            ".pi",
+            "workflow",
+            "runs",
+            run.id,
+            prepared.requirement.artifactPath
+          ),
+          requirementCriteria,
+        });
+      }
+
+      run.ticketPlan = await freezeTicketGraph(this.baseDir, run.id, graph);
+      run.tickets = graph.tickets.map((ticket) => ({
+        id: ticket.id,
+        title: ticket.title,
+        blockedBy: ticket.blockedBy,
+        phase: "pending",
+        reviewRound: 0,
+        fixRound: 0,
+      }));
+      run.finalGateStatus = "pending";
+      await saveWorkflowRun(this.baseDir, run);
+      await appendWorkflowEvent(this.baseDir, run.id, {
+        event: graphSource === "imported" ? "ticket.graph_imported" : "ticket.graph_generated",
+        state: run.state,
+        node: "ticket-graph",
+        details: {
+          source: graphSource,
+          contentHash: graph.contentHash,
+          snapshot: run.ticketPlan,
+        },
+      });
+      run = await this.stateMachine.transition(run, "executing_tickets", {
+        node: "ticket-frontier",
+        reason: "Ticket graph validated and frozen",
+      });
+      return options?.prepareOnly ? run : await this.executeTicketFrontier(run, agents);
+    } catch (error) {
+      if (error instanceof TicketGraphValidationError) {
+        return await this.markRunFailed(
+          run,
+          new WorkflowError("invalid_ticket_graph", error.message, { details: error.issues }),
+          "ticket-graph"
+        );
+      }
+      if (error instanceof TicketGenerationError) {
+        return await this.markRunFailed(
+          run,
+          new WorkflowError("invalid_ticket_graph", error.message, { details: { code: error.code } }),
+          "ticketizer"
+        );
+      }
+      return await this.markRunFailed(run, error, "ticket-graph");
+    }
+  }
+
 
   /**
    * The shared /work auto tail: worker → (review ↔ fix) loop until a
@@ -1936,11 +2767,13 @@ export class WorkflowEngine {
 
     await this.acquireRunLock(run.id);
 
-    if (run.source === "spec") {
+    let ticketGraph: TicketGraph | undefined;
+    if (run.source === "spec" || run.source === "tickets") {
       try {
         run = await this.ensureSpecRequirement(run);
+        if (run.source === "tickets") ticketGraph = await this.validateTicketResume(run);
       } catch (error) {
-        return await this.markRunFailed(run, error, "spec");
+        return await this.markRunFailed(run, error, run.source === "tickets" ? "ticket-resume" : "spec");
       }
     }
 
@@ -2052,6 +2885,21 @@ export class WorkflowEngine {
           }
           break;
         }
+        case "ticketing":
+          if (!ticketGraph) throw new WorkflowError("ticket_graph_corrupt", "Ticket plan is unavailable");
+          run = await this.stateMachine.transition(run, "executing_tickets", {
+            node: "ticket-frontier",
+            reason: "Resuming validated ticket plan",
+          });
+          run = await this.executeTicketFrontier(run, agents);
+          break;
+        case "executing_tickets":
+          run = await this.executeTicketFrontier(run, agents);
+          break;
+        case "finalizing":
+          if (!ticketGraph) throw new WorkflowError("ticket_graph_corrupt", "Final gate ticket plan is unavailable");
+          run = await this.executeTicketFinalGate(run, ticketGraph, agents);
+          break;
       }
       return run;
     } catch (error) {

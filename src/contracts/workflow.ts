@@ -3,6 +3,10 @@ import type { ImplementationResult } from "./implementation.ts";
 import type { ReviewResult } from "./review.ts";
 import type { FixResult } from "./fix.ts";
 import type {
+  TicketPlanSnapshot,
+  TicketRuntimeState,
+} from "./tickets.ts";
+import type {
   RequirementSnapshot,
   SpecPolicy,
   VerificationAggregate,
@@ -18,6 +22,9 @@ export type WorkflowState =
   | "testing"
   | "reviewing"
   | "fixing"
+  | "ticketing"
+  | "executing_tickets"
+  | "finalizing"
   | "completed"
   | "failed"
   | "aborted";
@@ -49,6 +56,17 @@ export type WorkflowErrorCode =
   | "verification_failed"
   | "scope_violation"
   | "scope_check_failed"
+  | "invalid_ticket_graph"
+  | "ticket_graph_corrupt"
+  | "requirement_coverage_gap"
+  | "no_ready_frontier"
+  | "invalid_red_evidence"
+  | "ticket_verification_failed"
+  | "ticket_scope_violation"
+  | "ticket_review_budget_exhausted"
+  | "agent_budget_exhausted"
+  | "final_verification_failed"
+  | "final_review_budget_exhausted"
   | "unknown";
 
 export interface WorkflowErrorDetails {
@@ -119,7 +137,7 @@ export interface WorkflowRun {
    * in `request` and must never run the planner/scout nodes (including on
    * resume — the plan is re-synthesized deterministically instead).
    */
-  source?: "auto" | "plan" | "spec";
+  source?: "auto" | "plan" | "spec" | "tickets";
 
   /** Spec document path (relative to cwd); present only for source === "spec". */
   specPath?: string;
@@ -138,6 +156,13 @@ export interface WorkflowRun {
 
   /** Latest actual change-scope aggregate (bounded). */
   scopeGate?: ScopeAggregate;
+
+  /** Ticket-orchestrated source and immutable graph state. */
+  ticketGraphSource?: "imported" | "generated";
+  ticketPlan?: TicketPlanSnapshot;
+  tickets?: TicketRuntimeState[];
+  activeTicketId?: string;
+  finalGateStatus?: "pending" | "passed" | "failed";
 }
 
 export interface WorkflowConfig {
@@ -188,6 +213,9 @@ export function validateWorkflowRun(data: unknown): { ok: true; data: WorkflowRu
     "testing",
     "reviewing",
     "fixing",
+    "ticketing",
+    "executing_tickets",
+    "finalizing",
     "completed",
     "failed",
     "aborted",

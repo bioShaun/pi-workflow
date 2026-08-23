@@ -105,6 +105,7 @@ Every review attempt is a new isolated agent invocation (`context: "fresh"`). Re
 | `/work auto <task> [--quick\|--normal\|--strict]` | Run complete automated workflow end-to-end |
 | `/work plan <task> [--quick\|--normal\|--strict]` | Produce and validate structured implementation plan |
 | `/work spec <spec-path> [--quick\|--normal\|--strict]` | Spec-driven flow: implement → review → fix directly from a prepared spec document (no scout/planner agents) |
+| `/work tickets <spec-path> [--tickets <ticket-dir>] [--quick\|--normal\|--strict]` | Ticket-orchestrated flow: execute epic specifications sequentially via validated ticket graph and red → green evidence |
 | `/work implement [runId]` | Execute implementation worker for approved plan |
 | `/work review [runId]` | Launch fresh independent reviewer(s) |
 | `/work fix [runId]` | Execute fix worker for review findings |
@@ -146,6 +147,22 @@ work:
 - Preflight requires only `worker` and `reviewer`. Resume verifies the immutable snapshot hash before agent execution. Recoverable legacy embedded specs migrate once; unsafe post-mutation recovery fails closed.
 - `/work status` shows source, short requirement hash/size, verification PASS/FAIL/PENDING, and scope PASS/FAIL/NOT_DECLARED. Completion lists engine commands and exit codes separately from agent-reported checks.
 - `/work spec <TAB>` completes project `spec.md` / `*.spec.md` paths.
+
+### Ticket-Orchestrated Flow (`/work tickets`)
+
+`/work tickets <spec-path> [--tickets <ticket-dir>]` orchestrates epic specifications into narrow, independently verifiable tracer bullets executed sequentially in fresh contexts.
+
+```text
+snapshot → ticket graph (import/generate) → frontier execution (red → green → review ↔ fix) → final gate (spec verification + final review) → completed
+```
+
+- **Explicit selection**: Use `/work spec` for atomic specifications fitting a single context, and `/work tickets` for multi-ticket epic specifications. The engine never guesses or silently switches between them.
+- **Imported vs Generated**: Pass `--tickets <ticket-dir>` to import pre-authored local tickets (e.g. `.scratch/<feature>/issues`), or omit it to generate the ticket graph via a bounded ticketizer agent. Both yield the same validated, immutable `TicketGraph` snapshot.
+- **Skill independence**: Runtime execution depends solely on engine contracts. `.agents/skills` is not a runtime dependency; local skill-authored tickets are optional importable artifacts.
+- **Enforced Red → Green Gate**: Behavioral tickets (`tdd: required`) must produce engine-observed failing test evidence matching expected failure descriptions before production implementation. Non-behavioral tickets require an explicit, immutable exemption reason (`tdd: exempt`).
+- **Deterministic Sequential Frontier**: Pending tickets whose blockers have completed form the ready frontier. The engine executes one ticket at a time in deterministic order (graph order, then identifier).
+- **Spec-Level Final Gate**: Completing all tickets triggers a whole-specification gate requiring complete acceptance criterion coverage, specification-level verification commands, full parent scope comparison, and a fresh final review.
+- **Resilience**: Checkpoints persist after each ticket transition. Resume validates snapshot hashes, baseline integrity, and ticket checkpoints before launching fresh agent contexts.
 
 ---
 ## Live Progress

@@ -4,7 +4,7 @@ import { InvalidTransitionError } from "./errors.ts";
 export const VALID_TRANSITIONS: Record<WorkflowState, WorkflowState[]> = {
   // created → plan_ready is the spec-driven entry (/work spec): the plan is
   // synthesized deterministically from the spec document, so no planner node runs.
-  created: ["scouting", "planning", "plan_ready", "aborted", "failed"],
+  created: ["scouting", "planning", "plan_ready", "ticketing", "aborted", "failed"],
   scouting: ["planning", "failed", "aborted"],
   planning: ["plan_ready", "failed", "aborted"],
   plan_ready: ["implementing", "failed", "aborted"],
@@ -12,6 +12,9 @@ export const VALID_TRANSITIONS: Record<WorkflowState, WorkflowState[]> = {
   testing: ["reviewing", "fixing", "failed", "aborted"],
   reviewing: ["completed", "fixing", "failed", "aborted"],
   fixing: ["testing", "reviewing", "failed", "aborted"],
+  ticketing: ["executing_tickets", "failed", "aborted"],
+  executing_tickets: ["finalizing", "failed", "aborted"],
+  finalizing: ["completed", "fixing", "failed", "aborted"],
   completed: [],
   failed: [],
   aborted: [],

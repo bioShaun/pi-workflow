@@ -88,6 +88,21 @@ describe("CLI Parser and UX Renderer", () => {
       assert.equal(s2.mode, "strict");
     });
 
+    it("parses bounded tickets arguments", () => {
+      const imported = parseWorkArgs(
+        "tickets .scratch/epic/spec.md --tickets .scratch/epic/issues --strict"
+      );
+      assert.equal(imported.subcommand, "tickets");
+      assert.equal(imported.task, ".scratch/epic/spec.md");
+      assert.equal(imported.ticketDir, ".scratch/epic/issues");
+      assert.equal(imported.mode, "strict");
+      assert.equal(imported.error, undefined);
+
+      assert.match(parseWorkArgs("tickets spec.md --tickets").error ?? "", /requires/);
+      assert.match(parseWorkArgs("tickets spec.md --quick --strict").error ?? "", /one execution mode/);
+      assert.match(parseWorkArgs("tickets spec.md --mystery").error ?? "", /Unknown/);
+    });
+
     it("parses auto, implement, review, fix, status, resume, abort", () => {
       assert.equal(parseWorkArgs("implement").subcommand, "implement");
       assert.equal(parseWorkArgs("review").subcommand, "review");
@@ -110,6 +125,7 @@ describe("CLI Parser and UX Renderer", () => {
       assert.match(help, /\/work auto/);
       assert.match(help, /\/work plan/);
       assert.match(help, /\/work spec/);
+      assert.match(help, /\/work tickets/);
       assert.match(help, /\/work review/);
       assert.match(help, /\/work list/);
     });
@@ -543,7 +559,7 @@ describe("CLI Parser and UX Renderer", () => {
 
       const completionsEmpty = registered.getArgumentCompletions("");
       assert.ok(completionsEmpty);
-      assert.equal(completionsEmpty.length, 11);
+      assert.equal(completionsEmpty.length, 12);
       assert.ok(!completionsEmpty.some((item) => item.value === ""));
 
       const completionsA = registered.getArgumentCompletions("a");

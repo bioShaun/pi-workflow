@@ -184,7 +184,7 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
 
   pi.registerCommand("work", {
     description:
-      "Deterministic workflow orchestrator: /work [auto|plan|spec|implement|review|fix|status|resume|abort|list|help]",
+      "Deterministic workflow orchestrator: /work [auto|plan|spec|tickets|implement|review|fix|status|resume|abort|list|help]",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const trimmed = (prefix ?? "").trimStart();
       // /work spec <TAB> completes spec document paths (repo convention:
@@ -201,6 +201,7 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
         "auto ",
         "plan ",
         "spec ",
+        "tickets ",
         "implement",
         "review",
         "fix",
@@ -313,6 +314,25 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
             break;
           }
 
+
+          case "tickets": {
+            if (parsed.error || !parsed.task) {
+              ui.notify(
+                parsed.error
+                  ? `Invalid /work tickets arguments: ${parsed.error}`
+                  : "Usage: /work tickets <path-to-spec> [--tickets <ticket-dir>] [--quick|--normal|--strict]",
+                "error"
+              );
+              return;
+            }
+            ui.notify(`Preparing ticket-orchestrated workflow from "${parsed.task}"...`, "info");
+            const run = await engine.startTickets(parsed.task, {
+              mode: parsed.mode,
+              ticketDir: parsed.ticketDir,
+            });
+            ui.notify(run.state === "failed" ? renderRunError(run) : renderStatus(run), run.state === "failed" ? "error" : "info");
+            break;
+          }
           case "auto": {
             if (!parsed.task) {
               ui.notify("Usage: /work auto <task description> [--quick|--normal|--strict]", "error");

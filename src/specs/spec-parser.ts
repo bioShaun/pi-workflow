@@ -55,6 +55,24 @@ function unquote(value: string): string {
   return v;
 }
 
+export function normalizeVerificationCommands(rawCommands: string[]): VerificationRequirement[] {
+  if (rawCommands.length === 0) {
+    throw new SpecFormatError("verification commands must be a non-empty list");
+  }
+  const commands: string[] = [];
+  for (const raw of rawCommands) {
+    const command = unquote(raw).trim();
+    if (command.length === 0) {
+      throw new SpecFormatError("verification commands contain an empty command");
+    }
+    if (commands.includes(command)) {
+      throw new SpecFormatError(`verification commands contain a duplicate command: "${command}"`);
+    }
+    commands.push(command);
+  }
+  return commands.map((command) => ({ command, required: true }));
+}
+
 interface Line {
   indent: number;
   text: string;
@@ -173,18 +191,7 @@ function parseWorkBlock(lines: Line[], workIndex: number): ParsedSpecDocument["p
         throw new SpecFormatError("work.verify must be a block list of commands (one per line, starting with '-')");
       }
       const { values: rawCommands, end } = parseStringList(block, i, "work.verify");
-      const commands: string[] = [];
-      for (const raw of rawCommands) {
-        const command = unquote(raw).trim();
-        if (command.length === 0) {
-          throw new SpecFormatError("work.verify contains an empty command");
-        }
-        if (commands.includes(command)) {
-          throw new SpecFormatError(`work.verify contains a duplicate command: "${command}"`);
-        }
-        commands.push(command);
-      }
-      verify = commands.map((command) => ({ command, required: true }));
+      verify = normalizeVerificationCommands(rawCommands);
       i = end - 1;
     } else if (key === "changes") {
       if (seenChanges) throw new SpecFormatError("work.changes is declared more than once");

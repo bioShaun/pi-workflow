@@ -17,7 +17,7 @@ export class ScopeComparisonError extends Error {
 export async function compareRepositoryScope(input: {
   cwd: string;
   baseline: RepositoryBaseline;
-  allowedChanges: string[];
+  allowedChanges?: string[];
   requirement: RequirementSnapshot;
   label: string;
 }): Promise<ScopeArtifact> {
@@ -54,10 +54,10 @@ export async function compareRepositoryScope(input: {
     changed.sort();
   }
 
-  const allowed = new Set(input.allowedChanges);
-  const outOfScope = changed.filter(
-    (filePath) => filePath === input.requirement.sourcePath || !allowed.has(filePath)
-  );
+  const allowed = input.allowedChanges ? new Set(input.allowedChanges) : undefined;
+  const outOfScope = allowed
+    ? changed.filter((filePath) => filePath === input.requirement.sourcePath || !allowed.has(filePath))
+    : changed.filter((filePath) => filePath === input.requirement.sourcePath);
   return {
     label: input.label,
     status: outOfScope.length === 0 ? "passed" : "failed",

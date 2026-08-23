@@ -4,6 +4,7 @@ export type WorkSubcommand =
   | "help"
   | "plan"
   | "spec"
+  | "tickets"
   | "implement"
   | "review"
   | "fix"
@@ -17,6 +18,8 @@ export interface ParsedWorkCommand {
   subcommand: WorkSubcommand;
   task?: string;
   runId?: string;
+  ticketDir?: string;
+  error?: string;
   mode?: WorkflowMode;
   rawArgs: string;
 }
@@ -64,6 +67,40 @@ export function parseWorkArgs(argsStr: string): ParsedWorkCommand {
         mode,
         rawArgs: trimmed,
       };
+    case "tickets": {
+      const ticketFlagIndexes = filteredRest
+        .map((part, index) => part === "--tickets" ? index : -1)
+        .filter((index) => index >= 0);
+      const modeCount = rest.filter((part) => ["--quick", "--normal", "--strict"].includes(part)).length;
+      if (modeCount > 1) {
+        return { subcommand: "tickets", mode, rawArgs: trimmed, error: "Specify only one execution mode" };
+      }
+      if (ticketFlagIndexes.length > 1) {
+        return { subcommand: "tickets", mode, rawArgs: trimmed, error: "Specify --tickets at most once" };
+      }
+      const ticketFlag = ticketFlagIndexes[0];
+      const specParts = ticketFlag === undefined ? filteredRest : filteredRest.slice(0, ticketFlag);
+      const ticketDir = ticketFlag === undefined ? undefined : filteredRest[ticketFlag + 1];
+      const trailing = ticketFlag === undefined ? [] : filteredRest.slice(ticketFlag + 2);
+      const unknownFlag = specParts.find((part) => part.startsWith("--"));
+      if (unknownFlag || (ticketFlag !== undefined && (!ticketDir || ticketDir.startsWith("--") || trailing.length > 0))) {
+        return {
+          subcommand: "tickets",
+          mode,
+          rawArgs: trimmed,
+          error: unknownFlag
+            ? `Unknown tickets option: ${unknownFlag}`
+            : "--tickets requires exactly one directory path",
+        };
+      }
+      return {
+        subcommand: "tickets",
+        task: specParts.join(" ").trim(),
+        ticketDir,
+        mode,
+        rawArgs: trimmed,
+      };
+    }
     case "implement":
       return {
         subcommand: "implement",
