@@ -37,6 +37,45 @@ Fresh Reviewer
 
 ---
 
+## Installation
+
+**Prerequisites**
+
+- [Pi coding agent](https://github.com/nicobailon/pi-subagents)
+- [pi-subagents](https://github.com/nicobailon/pi-subagents) ≥ 0.53.0 — the executor that launches every workflow subagent:
+
+```bash
+pi install npm:pi-subagents
+```
+
+> **Note:** the npm name `pi-workflow` is already taken by an unrelated VS Code extension. Install this project from git or a local path — not via `npm:pi-workflow`.
+
+**Install**
+
+```bash
+# from git
+pi install git:github.com/bioShaun/pi-workflow
+
+# from a local checkout
+pi install /absolute/path/to/pi-workflow
+```
+
+`pi install` writes to user settings (`~/.pi/agent/settings.json`) by default; add `-l` to install into project settings (`.pi/settings.json`) instead. Restart pi (or run `/reload` in a session) for the extension to load.
+
+**Required agents**
+
+The workflow's four roles resolve through the pi-subagents agent registry: `scout`, `worker`, and `reviewer` are builtins, and the `planner` role falls back automatically to `researcher` → `scout` → `oracle` when no `planner` agent is defined. This repository additionally ships a dedicated `planner` agent at `.agents/planner.md` (project scope).
+
+**Verify**
+
+```bash
+pi list      # pi-workflow should be listed
+```
+
+Then run `/work help` inside a pi session — the command table from below should appear.
+
+---
+
 ## Core Invariant
 
 > **Reviewer context MUST always be fresh.**

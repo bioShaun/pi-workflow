@@ -37,6 +37,45 @@ Fresh Reviewer
 
 ---
 
+## 安装
+
+**前置依赖**
+
+- [Pi coding agent](https://github.com/nicobailon/pi-subagents)
+- [pi-subagents](https://github.com/nicobailon/pi-subagents) ≥ 0.53.0 —— 工作流里所有 subagent 都由它负责启动：
+
+```bash
+pi install npm:pi-subagents
+```
+
+> **注意：**npm 上的 `pi-workflow` 这个名字已被一个无关的 VS Code 扩展占用——本项目请从 git 或本地路径安装，不要用 `npm:pi-workflow`。
+
+**安装**
+
+```bash
+# 从 git
+pi install git:github.com/bioShaun/pi-workflow
+
+# 从本地 checkout
+pi install /absolute/path/to/pi-workflow
+```
+
+`pi install` 默认写入用户配置（`~/.pi/agent/settings.json`）；加 `-l` 则写入项目配置（`.pi/settings.json`）。安装后重启 pi（或会话里执行 `/reload`）使扩展生效。
+
+**所需 agent**
+
+工作流的四个角色都通过 pi-subagents 的 agent 注册表解析：`scout`、`worker`、`reviewer` 是内置 agent；未定义 `planner` 时，`planner` 角色会自动回退到 `researcher` → `scout` → `oracle`。本仓库另在 `.agents/planner.md` 附带了一个专用的 `planner` agent（项目级）。
+
+**验证**
+
+```bash
+pi list      # 应能看到 pi-workflow
+```
+
+再在 pi 会话里执行 `/work help`，应显示下文中的命令表。
+
+---
+
 ## 核心不变量
 
 > **审查者的上下文必须永远是全新的。**
