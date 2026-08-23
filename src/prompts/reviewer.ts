@@ -2,7 +2,11 @@ import type { PlanResult } from "../contracts/plan.ts";
 import type { ImplementationResult } from "../contracts/implementation.ts";
 import type { ReviewFinding } from "../contracts/review.ts";
 import type { FixResult } from "../contracts/fix.ts";
-import { AUTONOMOUS_EXECUTION_RULE } from "./common.ts";
+import {
+  AUTONOMOUS_EXECUTION_RULE,
+  renderRequirementSection,
+  type SpecRequirementPrompt,
+} from "./common.ts";
 
 export type ReviewerSpecialization =
   | "general"
@@ -17,6 +21,7 @@ export interface BuildReviewerPromptInput {
   latestFix?: FixResult;
   previousFindings?: ReviewFinding[];
   specialization?: ReviewerSpecialization;
+  requirement?: SpecRequirementPrompt;
   round: number;
 }
 
@@ -40,8 +45,7 @@ export function buildReviewerPrompt(input: BuildReviewerPromptInput): string {
     "",
     "Return REQUEST_CHANGES when concrete corrective work is required.",
     "",
-    "## Original Requirement",
-    input.task.trim(),
+    ...renderRequirementSection(input.task, input.requirement),
     "",
     "## Approved Plan Summary",
     input.plan.summary,

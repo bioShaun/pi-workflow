@@ -104,6 +104,46 @@ describe("Quality Gates", () => {
       ]);
       assert.equal(result.status, "REVIEW_ALLOWED_WITH_WARNING");
     });
+
+    it("requires reported passing evidence for every required command", () => {
+      const required = [{ command: " npm test ", description: "tests", required: true }];
+
+      assert.equal(evaluateTestGate([], required).status, "FIX_REQUIRED");
+      assert.equal(
+        evaluateTestGate(
+          [{ command: "npm test", status: "skipped", summary: "not run" }],
+          required
+        ).status,
+        "FIX_REQUIRED"
+      );
+      assert.equal(
+        evaluateTestGate(
+          [{ command: "npm test", status: "passed", summary: "passed" }],
+          required
+        ).status,
+        "PASS"
+      );
+    });
+
+    it("requires some passing evidence for a required commandless check", () => {
+      const required = [{ description: "project checks", required: true }];
+      assert.equal(evaluateTestGate([], required).status, "FIX_REQUIRED");
+      assert.equal(
+        evaluateTestGate([{ status: "passed", summary: "passed" }], required).status,
+        "PASS"
+      );
+    });
+
+    it("warns for optional skipped checks only after required checks pass", () => {
+      const result = evaluateTestGate(
+        [
+          { command: "npm test", status: "passed", summary: "passed" },
+          { command: "integration", status: "skipped", summary: "not available" },
+        ],
+        [{ command: "npm test", description: "tests", required: true }]
+      );
+      assert.equal(result.status, "REVIEW_ALLOWED_WITH_WARNING");
+    });
   });
 
   describe("Review Gate", () => {
@@ -212,6 +252,50 @@ describe("Quality Gates", () => {
       const gate = evaluateCompletionGate(run);
       assert.equal(gate.canComplete, false);
       assert.match(gate.reasons[0], /failing tests/);
+    });
+
+    it("blocks spec completion without a passing engine verification aggregate", () => {
+      const run: WorkflowRun = {
+        version: 1,
+        id: "wf_spec",
+        cwd: "/project",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        state: "reviewing",
+        mode: "normal",
+        request: "Spec task",
+        source: "spec",
+        reviewRound: 1,
+        maxReviewRounds: 3,
+        implementation: {
+          summary: "Done",
+          changedFiles: [],
+          tests: [{ command: "npm test", status: "passed", summary: "agent says pass" }],
+          unresolvedIssues: [],
+          deviationsFromPlan: [],
+        },
+        specPolicy: { verification: [{ command: "npm test", required: true }] },
+        reviews: [{
+          verdict: "PASS",
+          summary: "Good",
+          findings: [],
+          testAssessment: { sufficient: true, explanation: "Good" },
+          confidence: 0.9,
+        }],
+        fixes: [],
+        baseline: { dirty: false, status: [], startedAt: new Date().toISOString() },
+      };
+
+      assert.equal(evaluateCompletionGate(run).canComplete, false);
+      run.verification = {
+        label: "implementation",
+        status: "passed",
+        passed: 1,
+        total: 1,
+        commands: [{ command: "npm test", status: "passed", exitCode: 0 }],
+        completedAt: new Date().toISOString(),
+      };
+      assert.equal(evaluateCompletionGate(run).canComplete, true);
     });
 
     it("blocks completion in strict mode if not all reviewers passed", () => {

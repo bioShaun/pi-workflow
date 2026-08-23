@@ -1,3 +1,6 @@
+import type { PlanTest } from "../contracts/plan.ts";
+import type { TestResult } from "../contracts/implementation.ts";
+import { evaluateTestGate } from "./test-gate.ts";
 import type { WorkflowRun } from "../contracts/workflow.ts";
 
 export interface CompletionGateResult {
@@ -35,15 +38,47 @@ export function evaluateCompletionGate(run: WorkflowRun): CompletionGateResult {
     }
   }
 
-  // Check tests
-  const latestTests =
+  const latestTests: TestResult[] =
     run.fixes.length > 0
       ? run.fixes[run.fixes.length - 1].tests
       : run.implementation?.tests ?? [];
 
-  const hasFailedTests = latestTests.some((t) => t.status === "failed");
-  if (hasFailedTests) {
-    reasons.push("There are failing tests in the latest test run");
+  let verificationTests = latestTests;
+  let requiredTests: PlanTest[] = run.plan?.tests ?? [];
+  if (run.source === "spec" && run.specPolicy) {
+    if (!run.verification) {
+      reasons.push("No engine verification aggregate exists for this spec workflow");
+    } else {
+      verificationTests = run.verification.commands.map((command) => ({
+        command: command.command,
+        status: command.status,
+        summary: `${command.command} exited with status ${command.exitCode}`,
+        exitCode: command.exitCode,
+      }));
+      requiredTests = (run.specPolicy?.verification ?? []).map((requirement) => ({
+        command: requirement.command,
+        description: requirement.command,
+        required: requirement.required,
+      }));
+      if (
+        run.verification.status !== "passed"
+        || run.verification.total === 0
+        || run.verification.passed !== run.verification.total
+      ) {
+        reasons.push("Latest engine verification aggregate did not pass");
+      }
+    }
+  }
+
+  if (run.source === "spec" && run.specPolicy?.allowedChanges) {
+    if (!run.scopeGate || run.scopeGate.status !== "passed") {
+      reasons.push("Latest repository scope gate did not pass");
+    }
+  }
+
+  const testGate = evaluateTestGate(verificationTests, requiredTests);
+  if (testGate.status === "FIX_REQUIRED") {
+    reasons.push(`There are failing tests in the latest test run: ${testGate.reason}`);
   }
 
   return {

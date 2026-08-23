@@ -24,6 +24,14 @@ import {
 } from "../contracts/review.ts";
 import { FIX_RESULT_SCHEMA, validateFixResult, type FixResult } from "../contracts/fix.ts";
 import { SCOUT_RESULT_SCHEMA, validateScoutResult, type ScoutResult } from "../contracts/scout.ts";
+import type {
+  RequirementSnapshot,
+  SpecPolicy,
+  VerificationAggregate,
+  VerificationArtifact,
+  ScopeAggregate,
+} from "../contracts/requirement.ts";
+import { parseSpecDocument, resolveSpecMode, SpecFormatError } from "../specs/spec-parser.ts";
 import { evaluatePlanGate } from "../gates/plan-gate.ts";
 import { evaluateTestGate } from "../gates/test-gate.ts";
 import { evaluateCompletionGate } from "../gates/completion-gate.ts";
@@ -36,10 +44,16 @@ import { buildPlannerPrompt } from "../prompts/planner.ts";
 import { buildWorkerPrompt } from "../prompts/worker.ts";
 import { buildReviewerPrompt, type ReviewerSpecialization } from "../prompts/reviewer.ts";
 import { buildFixerPrompt } from "../prompts/fixer.ts";
+import type { SpecRequirementPrompt } from "../prompts/common.ts";
 import { captureRepositoryBaseline } from "../repository/baseline.ts";
+import {
+  compareRepositoryScope,
+  ScopeComparisonError,
+} from "../repository/scope.ts";
 import {
   getRunDir,
   getWorkflowBaseDir,
+  resolveRunArtifactPath,
 } from "../storage/paths.ts";
 import {
   saveWorkflowRun,
@@ -66,9 +80,38 @@ import {
   validateWorkflowPreflight,
   type WorkflowRole,
 } from "../agents/preflight.ts";
+import {
+  ShellVerificationCommandRunner,
+  type VerificationCommandRunner,
+} from "./verification.ts";
 
 /** Resolved role → agent-name mapping for a run (audit Finding 10). */
 export type AgentRoles = Record<WorkflowRole, string>;
+
+/** Agent roles a run can actually launch, shared by every entry and recovery path. */
+export function requiredRolesForRun(
+  run: Pick<WorkflowRun, "source" | "mode">
+): WorkflowRole[] {
+  if (run.source === "spec") return ["worker", "reviewer"];
+  return run.mode === "quick"
+    ? ["planner", "worker", "reviewer"]
+    : ["scout", "planner", "worker", "reviewer"];
+}
+
+function requirementPromptForRun(run: WorkflowRun): SpecRequirementPrompt | undefined {
+  if (run.source !== "spec" || !run.requirement || !run.specPolicy) return undefined;
+  return {
+    snapshot: run.requirement,
+    snapshotPath: path.join(
+      ".pi",
+      "workflow",
+      "runs",
+      run.id,
+      run.requirement.artifactPath
+    ),
+    policy: run.specPolicy,
+  };
+}
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -94,7 +137,7 @@ export function generateWorkflowRunId(): string {
  * worker's "Verification Tests to Run" section (the test gate itself
  * classifies the worker-reported tests).
  */
-export function synthesizeSpecPlan(specPath: string): PlanResult {
+export function synthesizeSpecPlan(specPath: string, policy?: SpecPolicy): PlanResult {
   return {
     summary: `Implement the specification "${specPath}" faithfully and completely.`,
     understanding:
@@ -116,7 +159,13 @@ export function synthesizeSpecPlan(specPath: string): PlanResult {
         description: "Run the test suite and any verification the specification requires; report results honestly",
       },
     ],
-    tests: [{ description: "The project's test suite passes after implementation", required: true }],
+    tests: policy
+      ? policy.verification.map((requirement) => ({
+          command: requirement.command,
+          description: requirement.command,
+          required: requirement.required,
+        }))
+      : [{ description: "The project's test suite passes after implementation", required: true }],
     risks: [],
     assumptions: ["The specification is complete, unambiguous, and authoritative for this run"],
     complexity: "medium",
@@ -144,9 +193,10 @@ export interface WorkflowEngineOptions {
   retryPolicy?: RetryPolicy;
   /** Injectable clock for retry backoff (audit Finding 9); tests pass a recorder. */
   sleep?: (ms: number) => Promise<void>;
-  /** Injectable preflight (post-remediation review M1); tests use it to
-   *  simulate preflight failures. Receives the mode being preflighted. */
-  preflightForMode?: (mode: WorkflowMode) => Promise<AgentRoles>;
+  verificationRunner?: VerificationCommandRunner;
+  /** Injectable preflight seam. Receives both mode and the effective roles
+   *  selected from the run source, so tests can assert the launch contract. */
+  preflightForMode?: (mode: WorkflowMode, requiredRoles: WorkflowRole[]) => Promise<AgentRoles>;
   /** Optional progress callback for real-time UI/UX feedback (Claude Code style streaming) */
   onProgress?: WorkflowProgressCallback;
 }
@@ -159,8 +209,9 @@ export class WorkflowEngine {
   public readonly stateMachine: StateMachine;
   public readonly retryPolicy: RetryPolicy;
   public readonly sleep: (ms: number) => Promise<void>;
+  public readonly verificationRunner: VerificationCommandRunner;
   public readonly onProgress?: WorkflowProgressCallback;
-  private readonly preflightOverride?: (mode: WorkflowMode) => Promise<AgentRoles>;
+  private readonly preflightOverride?: (mode: WorkflowMode, requiredRoles: WorkflowRole[]) => Promise<AgentRoles>;
 
   constructor(options: WorkflowEngineOptions) {
     this.cwd = options.cwd;
@@ -177,6 +228,7 @@ export class WorkflowEngine {
     this.stateMachine = new StateMachine(this.baseDir);
     this.retryPolicy = options.retryPolicy ?? new RetryPolicy();
     this.sleep = options.sleep ?? defaultSleep;
+    this.verificationRunner = options.verificationRunner ?? new ShellVerificationCommandRunner();
     this.preflightOverride = options.preflightForMode;
     this.onProgress = options.onProgress;
   }
@@ -263,17 +315,19 @@ export class WorkflowEngine {
     return run;
   }
 
-  /**
-   * Audit Finding 10: run preflight for a mode and return the resolved
-   * role → agent mapping. Throws preflight_failed before any modification.
-   * `requiredRoles` narrows the checked set (the spec-driven flow runs no
-   * scout or planner node).
-   */
-  private async preflightForMode(mode: WorkflowMode, requiredRoles?: WorkflowRole[]): Promise<AgentRoles> {
+  /** Run preflight for exactly the roles selected from the run source. */
+  private async preflightForRun(run: Pick<WorkflowRun, "source" | "mode">): Promise<AgentRoles> {
+    const requiredRoles = requiredRolesForRun(run);
     if (this.preflightOverride) {
-      return this.preflightOverride(mode);
+      return this.preflightOverride(run.mode, requiredRoles);
     }
-    const preflight = await validateWorkflowPreflight(this.config, this.cwd, mode, undefined, requiredRoles);
+    const preflight = await validateWorkflowPreflight(
+      this.config,
+      this.cwd,
+      run.mode,
+      undefined,
+      requiredRoles
+    );
     if (!preflight.ok) {
       throw new WorkflowError("preflight_failed", preflight.error ?? "Preflight checks failed", {
         details: preflight.diagnostics,
@@ -286,11 +340,25 @@ export class WorkflowEngine {
     request: string,
     initialMode: WorkflowMode,
     autoRouted: boolean,
-    origin?: { source: "auto" | "plan" | "spec"; specPath?: string }
+    origin?: {
+      source: "auto" | "plan" | "spec";
+      specPath?: string;
+      specPolicy?: SpecPolicy;
+      requirement?: RequirementSnapshot;
+      requirementContent?: string;
+    }
   ): Promise<WorkflowRun> {
     const runId = generateWorkflowRunId();
     await this.acquireRunLock(runId);
 
+    if (origin?.requirement && origin.requirementContent !== undefined) {
+      await saveArtifact(
+        this.baseDir,
+        runId,
+        origin.requirement.artifactPath,
+        origin.requirementContent
+      );
+    }
     const baseline = await captureRepositoryBaseline(this.cwd);
     const now = new Date().toISOString();
 
@@ -312,19 +380,30 @@ export class WorkflowEngine {
       modeResolved: !autoRouted,
       source: origin?.source,
       specPath: origin?.specPath,
+      specPolicy: origin?.specPolicy,
+      requirement: origin?.requirement,
     };
 
     await saveWorkflowRun(this.baseDir, run);
     await appendWorkflowEvent(this.baseDir, run.id, {
       event: "workflow.created",
       state: "created",
-      details: {
-        mode: run.mode,
-        autoRouted,
-        maxReviewRounds: run.maxReviewRounds,
-        source: origin?.source,
-        request,
-      },
+      details: origin?.source === "spec"
+        ? {
+            mode: run.mode,
+            autoRouted,
+            maxReviewRounds: run.maxReviewRounds,
+            source: origin.source,
+            requirement: origin.requirement,
+            policy: origin.specPolicy,
+          }
+        : {
+            mode: run.mode,
+            autoRouted,
+            maxReviewRounds: run.maxReviewRounds,
+            source: origin?.source,
+            request,
+          },
     });
 
     return run;
@@ -401,11 +480,226 @@ export class WorkflowEngine {
     for (let i = 0; i < events.length; i++) {
       if (events[i].event === "node.started" && events[i].node === nodeId) startedIndex = i;
     }
+
     if (startedIndex === -1) return false;
     for (let i = startedIndex + 1; i < events.length; i++) {
       if (events[i].event === "node.completed" && events[i].node === nodeId) return false;
     }
     return true;
+  }
+  private async ensureSpecRequirement(run: WorkflowRun): Promise<WorkflowRun> {
+    if (run.source !== "spec") return run;
+
+    if (run.requirement) {
+      let content: string;
+      try {
+        const snapshotPath = resolveRunArtifactPath(
+          this.baseDir,
+          run.id,
+          run.requirement.artifactPath
+        );
+        content = await fs.readFile(snapshotPath, "utf-8");
+      } catch (error) {
+        throw new WorkflowError(
+          "requirement_corrupt",
+          `Cannot read immutable requirement snapshot for run ${run.id}`,
+          { details: error }
+        );
+      }
+      const actualHash = crypto.createHash("sha256").update(content, "utf8").digest("hex");
+      if (actualHash !== run.requirement.sha256) {
+        throw new WorkflowError(
+          "requirement_corrupt",
+          `Immutable requirement snapshot hash mismatch for run ${run.id}`,
+          { details: { expected: run.requirement.sha256, actual: actualHash } }
+        );
+      }
+      return run;
+    }
+
+    if (run.specPolicy) {
+      throw new WorkflowError(
+        "requirement_corrupt",
+        `Spec run ${run.id} is missing its immutable requirement metadata`
+      );
+    }
+
+    const embedded = run.request.match(
+      /--- SPECIFICATION BEGIN ---\n([\s\S]*?)\n--- SPECIFICATION END ---/
+    )?.[1];
+    let content = embedded;
+    if (content === undefined) {
+      const events = await loadWorkflowEvents(this.baseDir, run.id);
+      const mutationStarted = events.some(
+        (event) => event.event === "node.started"
+          && (event.node === "implement" || event.node?.startsWith("fix-") === true)
+      );
+      if (mutationStarted || !run.specPath) {
+        throw new WorkflowError(
+          "requirement_corrupt",
+          `Legacy spec run ${run.id} has no recoverable authoritative requirement after repository mutation`
+        );
+      }
+      try {
+        content = await fs.readFile(path.resolve(this.cwd, run.specPath), "utf-8");
+      } catch (error) {
+        throw new WorkflowError(
+          "requirement_corrupt",
+          `Cannot recover the source requirement for legacy spec run ${run.id}`,
+          { details: error }
+        );
+      }
+    }
+
+    const parsed = parseSpecDocument(content);
+    const sourcePath = run.specPath ?? "legacy-embedded-spec.md";
+    run.requirement = {
+      kind: "spec",
+      sourcePath,
+      artifactPath: "requirement.md",
+      sha256: crypto.createHash("sha256").update(content, "utf8").digest("hex"),
+      characters: content.length,
+    };
+    run.specPolicy = parsed.policy;
+    run.request = `Spec-driven workflow from immutable requirement snapshot for "${sourcePath}".`;
+    await saveArtifact(this.baseDir, run.id, run.requirement.artifactPath, content);
+    await saveWorkflowRun(this.baseDir, run);
+    await appendWorkflowEvent(this.baseDir, run.id, {
+      event: "spec.snapshot_migrated",
+      state: run.state,
+      node: "spec",
+      details: { requirement: run.requirement, policy: run.specPolicy },
+    });
+    return run;
+  }
+
+  private async loadVerificationArtifact(
+    run: WorkflowRun,
+    label: string
+  ): Promise<VerificationArtifact | undefined> {
+    try {
+      const raw = await fs.readFile(
+        resolveRunArtifactPath(this.baseDir, run.id, `verification/${label}.json`),
+        "utf-8"
+      );
+      const artifact = JSON.parse(raw) as VerificationArtifact;
+      const expected = run.specPolicy?.verification.map((item) => item.command) ?? [];
+      if (
+        artifact.label !== label
+        || !Array.isArray(artifact.commands)
+        || artifact.commands.length !== expected.length
+        || artifact.commands.some((result, index) => result.command !== expected[index])
+        || artifact.commands.some((result) => result.status !== "passed" && result.status !== "failed")
+      ) {
+        return undefined;
+      }
+      return artifact;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async runSpecVerification(
+    run: WorkflowRun,
+    label: string
+  ): Promise<VerificationArtifact | undefined> {
+    if (run.source !== "spec" || !run.specPolicy) return undefined;
+
+    let artifact = await this.loadVerificationArtifact(run, label);
+    if (!artifact) {
+      await appendWorkflowEvent(this.baseDir, run.id, {
+        event: "gate.verification.started",
+        state: run.state,
+        node: label,
+        details: { label, commands: run.specPolicy.verification.map((item) => item.command) },
+      });
+      const commands: VerificationArtifact["commands"] = [];
+      for (const requirement of run.specPolicy.verification) {
+        try {
+          commands.push(await this.verificationRunner.run({
+            command: requirement.command,
+            cwd: this.cwd,
+          }));
+        } catch (error) {
+          throw new WorkflowError(
+            "verification_failed",
+            `Verification command could not produce a trustworthy result: ${requirement.command}`,
+            { details: error }
+          );
+        }
+      }
+      const passed = commands.filter((result) => result.status === "passed").length;
+      artifact = {
+        label,
+        status: passed === commands.length && commands.length > 0 ? "passed" : "failed",
+        passed,
+        total: commands.length,
+        completedAt: new Date().toISOString(),
+        commands,
+      };
+      await saveArtifact(this.baseDir, run.id, `verification/${label}.json`, artifact);
+    }
+
+    const aggregate: VerificationAggregate = {
+      label: artifact.label,
+      status: artifact.status,
+      passed: artifact.passed,
+      total: artifact.total,
+      commands: artifact.commands.map((result) => ({
+        command: result.command,
+        status: result.status,
+        exitCode: result.exitCode,
+      })),
+      completedAt: artifact.completedAt,
+    };
+    run.verification = aggregate;
+    await saveWorkflowRun(this.baseDir, run);
+    await appendWorkflowEvent(this.baseDir, run.id, {
+      event: "gate.verification",
+      state: run.state,
+      node: label,
+      details: { ...aggregate },
+    });
+    return artifact;
+  }
+
+  private async runScopeGate(run: WorkflowRun, label: string): Promise<boolean> {
+    const allowedChanges = run.specPolicy?.allowedChanges;
+    if (run.source !== "spec" || !allowedChanges || !run.requirement) return true;
+
+    await this.ensureSpecRequirement(run);
+    let artifact;
+    try {
+      artifact = await compareRepositoryScope({
+        cwd: this.cwd,
+        baseline: run.baseline,
+        allowedChanges,
+        requirement: run.requirement,
+        label,
+      });
+    } catch (error) {
+      if (error instanceof ScopeComparisonError) {
+        throw new WorkflowError("scope_check_failed", error.message, { details: error });
+      }
+      throw error;
+    }
+    await saveArtifact(this.baseDir, run.id, `scope/${label}.json`, artifact);
+    const aggregate: ScopeAggregate = {
+      label: artifact.label,
+      status: artifact.status,
+      changed: artifact.changed,
+      outOfScope: artifact.outOfScope,
+      completedAt: artifact.completedAt,
+    };
+    run.scopeGate = aggregate;
+    await saveWorkflowRun(this.baseDir, run);
+    await appendWorkflowEvent(this.baseDir, run.id, {
+      event: "gate.scope",
+      state: run.state,
+      node: label,
+      details: { ...aggregate },
+    });
+    return artifact.status === "passed";
   }
 
   /**
@@ -745,7 +1039,12 @@ export class WorkflowEngine {
     });
 
     const scout = await this.loadScoutArtifact(run.id);
-    const taskPrompt = buildWorkerPrompt({ task: run.request, plan: approvedPlan, scout });
+    const taskPrompt = buildWorkerPrompt({
+      task: run.request,
+      plan: approvedPlan,
+      scout,
+      requirement: requirementPromptForRun(run),
+    });
     const implData = await executeNodeWithRetry<ImplementationResult>({
       nodeId: "implement",
       nodeLabel: "Worker node",
@@ -799,38 +1098,13 @@ export class WorkflowEngine {
       fallbackMessage: "Worker produced no valid result",
     });
 
-    run.implementation = implData;
-    await saveArtifact(this.baseDir, run.id, "implementation.json", implData);
-
-    run = await this.stateMachine.transition(run, "testing", {
-      node: "implement",
-      reason: "Implementation finished, evaluating test gate",
-    });
-
-    const testGate = evaluateTestGate(implData.tests, approvedPlan.tests);
-    await appendWorkflowEvent(this.baseDir, run.id, {
-      event: "gate.test",
-      state: run.state,
-      details: { status: testGate.status, reason: testGate.reason },
-    });
-
-    // Audit Finding 3 (§10/§22): an unacceptable test gate routes directly
-    // to fixing. The fixer prompt receives the failed tests.
-    if (testGate.status === "FIX_REQUIRED") {
-      run = await this.stateMachine.transition(run, "fixing", {
-        node: "implement",
-        reason: `Test gate requires fixes: ${testGate.reason}`,
-      });
-    }
-
-    await appendWorkflowEvent(this.baseDir, run.id, {
-      event: "node.completed",
-      state: run.state,
-      node: "implement",
-    });
+    run = await this.settleImplementation(run, implData);
 
     const passedTests = implData.tests.filter((t) => t.status === "passed").length;
     const totalTests = implData.tests.length;
+    const deterministicGateStatus = run.source === "spec"
+      ? (run.verification?.status === "passed" ? "PASS" : "FIX_REQUIRED")
+      : evaluateTestGate(implData.tests, approvedPlan.tests).status;
 
     this.onProgress?.({
       type: "node_end",
@@ -844,7 +1118,7 @@ export class WorkflowEngine {
         changedFiles: implData.changedFiles.map((f) => f.path),
         passedTests,
         totalTests,
-        testGateStatus: testGate.status,
+        testGateStatus: deterministicGateStatus,
       },
     });
 
@@ -870,20 +1144,35 @@ export class WorkflowEngine {
       reason: "Implementation finished, evaluating test gate",
     });
 
-    const testGate = evaluateTestGate(implData.tests, plan.tests);
-    await appendWorkflowEvent(this.baseDir, run.id, {
-      event: "gate.test",
-      state: run.state,
-      details: { status: testGate.status, reason: testGate.reason },
-    });
-
-    // Audit Finding 3 (§10/§22): an unacceptable test gate routes directly
-    // to fixing. The fixer prompt receives the failed tests.
-    if (testGate.status === "FIX_REQUIRED") {
-      run = await this.stateMachine.transition(run, "fixing", {
-        node: "implement",
-        reason: `Test gate requires fixes: ${testGate.reason}`,
+    if (run.source === "spec") {
+      const scopePassed = await this.runScopeGate(run, "implementation");
+      if (!scopePassed) {
+        run = await this.stateMachine.transition(run, "fixing", {
+          node: "implement",
+          reason: `Repository scope violation: ${run.scopeGate?.outOfScope.join(", ")}`,
+        });
+      } else {
+        const verification = await this.runSpecVerification(run, "implementation");
+        if (verification?.status === "failed") {
+          run = await this.stateMachine.transition(run, "fixing", {
+            node: "implement",
+            reason: "Engine verification failed after implementation",
+          });
+        }
+      }
+    } else {
+      const testGate = evaluateTestGate(implData.tests, plan.tests);
+      await appendWorkflowEvent(this.baseDir, run.id, {
+        event: "gate.test",
+        state: run.state,
+        details: { status: testGate.status, reason: testGate.reason },
       });
+      if (testGate.status === "FIX_REQUIRED") {
+        run = await this.stateMachine.transition(run, "fixing", {
+          node: "implement",
+          reason: `Test gate requires fixes: ${testGate.reason}`,
+        });
+      }
     }
 
     await appendWorkflowEvent(this.baseDir, run.id, {
@@ -962,11 +1251,9 @@ export class WorkflowEngine {
           : {
               ok: false,
               validationError: validation.error,
-              terminalMessage: `Reviewer ${nodeId} returned an invalid review: ${validation.error}`,
+              terminalMessage: `Reviewer ${nodeId} returned an invalid result: ${validation.error}`,
             };
       },
-      // Stamp the review identity and mark the node complete before the
-      // terminal progress event is emitted by the caller.
       onValidated: async (data) => {
         data.reviewerId = reviewerId;
         data.round = round;
@@ -1045,6 +1332,7 @@ export class WorkflowEngine {
         previousFindings,
         specialization: spec.specialization,
         round: currentRound,
+        requirement: requirementPromptForRun(run),
       });
       const result = await this.runReviewer(run, agents, spec.nodeId, prompt, spec.reviewerId, currentRound);
       reviewsForThisRound.push(result);
@@ -1069,6 +1357,7 @@ export class WorkflowEngine {
         previousFindings: finalPreviousFindings,
         specialization: "final",
         round: currentRound,
+        requirement: requirementPromptForRun(run),
       });
       const finalResult = await this.runReviewer(run, agents, finalNodeId, finalPrompt, "reviewer-final", currentRound);
       reviewsForThisRound.push(finalResult);
@@ -1138,6 +1427,24 @@ export class WorkflowEngine {
       throw new WorkflowError("invalid_transition", "Cannot fix without an approved plan");
     }
     const approvedPlan = run.plan;
+    if (
+      run.source === "spec"
+      && run.verification?.status === "failed"
+      && run.fixes.length >= run.maxReviewRounds
+    ) {
+      const message = `Required verification still fails after ${run.fixes.length} fix round(s)`;
+      run = await this.stateMachine.transition(run, "failed", {
+        node: `fix-${run.fixes.length + 1}`,
+        reason: message,
+        error: {
+          code: "required_tests_failed",
+          message,
+          nodeId: `fix-${run.fixes.length + 1}`,
+        },
+      });
+      await this.releaseRunLock(run.id);
+      return run;
+    }
 
     // Fix rounds have their own counter: a fix is a fix, whether it was
     // driven by review findings or by the test gate (audit Finding 3).
@@ -1184,14 +1491,23 @@ export class WorkflowEngine {
       run.fixes.length > 0
         ? run.fixes[run.fixes.length - 1].tests
         : run.implementation?.tests ?? [];
-    const failedTests = latestTests.filter((t) => t.status === "failed");
+    const failedTests = latestTests.filter((test) => test.status === "failed");
+    const latestVerification = run.verification
+      ? await this.loadVerificationArtifact(run, run.verification.label)
+      : undefined;
+    const verificationFailures = latestVerification?.commands.filter(
+      (result) => result.status === "failed"
+    );
 
     const taskPrompt = buildFixerPrompt({
       task: run.request,
       plan: approvedPlan,
       findings,
       failedTests,
+      verificationFailures,
+      outOfScopePaths: run.scopeGate?.outOfScope,
       round: fixRound,
+      requirement: requirementPromptForRun(run),
     });
 
     const fixData = await executeNodeWithRetry<FixResult>({
@@ -1294,6 +1610,24 @@ export class WorkflowEngine {
       reason: `Fix round ${fixRound} completed; ready for regression testing/review`,
     });
 
+    if (run.source === "spec") {
+      const scopePassed = await this.runScopeGate(run, `fix-${fixRound}`);
+      if (!scopePassed) {
+        run = await this.stateMachine.transition(run, "fixing", {
+          node: nodeId,
+          reason: `Repository scope violation after fix round ${fixRound}: ${run.scopeGate?.outOfScope.join(", ")}`,
+        });
+      } else {
+        const verification = await this.runSpecVerification(run, `fix-${fixRound}`);
+        if (verification?.status === "failed") {
+          run = await this.stateMachine.transition(run, "fixing", {
+            node: nodeId,
+            reason: `Engine verification failed after fix round ${fixRound}`,
+          });
+        }
+      }
+    }
+
     await appendWorkflowEvent(this.baseDir, run.id, {
       event: "node.completed",
       state: run.state,
@@ -1324,7 +1658,10 @@ export class WorkflowEngine {
 
     // One preflight, before the run exists (fail before modifications, §29).
     // The resolved mapping serves the whole run — no second preflight later.
-    const agents = await this.preflightForMode(initialMode);
+    const agents = await this.preflightForRun({
+      mode: initialMode,
+      source: options?.source ?? "plan",
+    });
 
     const run = await this.createRun(request, initialMode, autoRouted, {
       source: options?.source ?? "plan",
@@ -1358,7 +1695,7 @@ export class WorkflowEngine {
       );
     }
 
-    const agents = await this.preflightForMode(run.mode);
+    const agents = await this.preflightForRun(run);
     await this.acquireRunLock(run.id);
     try {
       return await this.executeWorkerNode(run, agents);
@@ -1383,7 +1720,7 @@ export class WorkflowEngine {
       );
     }
 
-    const agents = await this.preflightForMode(run.mode);
+    const agents = await this.preflightForRun(run);
     await this.acquireRunLock(run.id);
     try {
       return await this.executeReviewNode(run, agents);
@@ -1409,7 +1746,7 @@ export class WorkflowEngine {
       }
     }
 
-    const agents = await this.preflightForMode(run.mode);
+    const agents = await this.preflightForRun(run);
     await this.acquireRunLock(run.id);
     try {
       return await this.executeFixNode(run, agents);
@@ -1462,9 +1799,8 @@ export class WorkflowEngine {
     if (!specContent.trim()) {
       throw new WorkflowError("invalid_transition", `Spec file "${specPath}" is empty`);
     }
-    // The spec is embedded verbatim in every node prompt (worker, each fresh
-    // reviewer, fixer); an oversized document would multiply token cost per
-    // node. Fail fast with guidance instead of burning the budget.
+    // Keep a bounded source document even though prompts reference the
+    // immutable artifact instead of embedding it.
     const SPEC_MAX_CHARS = 100_000;
     if (specContent.length > SPEC_MAX_CHARS) {
       throw new WorkflowError(
@@ -1474,25 +1810,41 @@ export class WorkflowEngine {
       );
     }
 
-    const mode = options?.mode ?? this.config.defaultMode;
+    let parsedSpec;
+    try {
+      parsedSpec = parseSpecDocument(specContent);
+    } catch (error) {
+      if (error instanceof SpecFormatError) {
+        throw new WorkflowError("invalid_spec", error.message);
+      }
+      throw error;
+    }
+    const relativeSpecPath = path.relative(this.cwd, absoluteSpecPath) || specPath;
+    const requirement: RequirementSnapshot = {
+      kind: "spec",
+      sourcePath: relativeSpecPath,
+      artifactPath: "requirement.md",
+      sha256: crypto.createHash("sha256").update(specContent, "utf8").digest("hex"),
+      characters: specContent.length,
+    };
+    const mode = resolveSpecMode(options?.mode, parsedSpec.policy.mode, this.config.defaultMode);
     // The spec flow runs only the worker and reviewer nodes; planner/scout
     // agents are not required to be configured at all (§29: fail before
     // modifications, on exactly the roles this flow launches).
-    const agents = await this.preflightForMode(mode, ["worker", "reviewer"]);
+    const agents = await this.preflightForRun({ mode, source: "spec" });
 
-    const relativeSpecPath = path.relative(this.cwd, absoluteSpecPath) || specPath;
-    const request = [
-      `Spec-driven workflow: implement the specification document "${relativeSpecPath}", reproduced in full below.`,
-      "",
-      "--- SPECIFICATION BEGIN ---",
-      specContent.trim(),
-      "--- SPECIFICATION END ---",
-    ].join("\n");
+    const request = `Spec-driven workflow from immutable requirement snapshot for "${relativeSpecPath}".`;
 
-    let run = await this.createRun(request, mode, false, { source: "spec", specPath: relativeSpecPath });
+    let run = await this.createRun(request, mode, false, {
+      source: "spec",
+      specPath: relativeSpecPath,
+      specPolicy: parsedSpec.policy,
+      requirement,
+      requirementContent: specContent,
+    });
 
     try {
-      run.plan = synthesizeSpecPlan(relativeSpecPath);
+      run.plan = synthesizeSpecPlan(relativeSpecPath, parsedSpec.policy);
       run.complexity = run.plan.complexity;
 
       await saveArtifact(this.baseDir, run.id, "plan.json", run.plan);
@@ -1501,7 +1853,10 @@ export class WorkflowEngine {
         event: "spec.loaded",
         state: run.state,
         node: "spec",
-        details: { path: relativeSpecPath, characters: specContent.length },
+        details: {
+          requirement,
+          policy: parsedSpec.policy,
+        },
       });
 
       run = await this.stateMachine.transition(run, "plan_ready", {
@@ -1541,7 +1896,8 @@ export class WorkflowEngine {
    */
   private async restoreSpecPlan(run: WorkflowRun): Promise<WorkflowRun> {
     if (!run.plan) {
-      const plan = (await this.loadPlanArtifact(run.id)) ?? (run.specPath ? synthesizeSpecPlan(run.specPath) : undefined);
+      const plan = (await this.loadPlanArtifact(run.id))
+        ?? (run.specPath ? synthesizeSpecPlan(run.specPath, run.specPolicy) : undefined);
       if (!plan) {
         throw new WorkflowError(
           "state_corrupt",
@@ -1580,12 +1936,20 @@ export class WorkflowEngine {
 
     await this.acquireRunLock(run.id);
 
+    if (run.source === "spec") {
+      try {
+        run = await this.ensureSpecRequirement(run);
+      } catch (error) {
+        return await this.markRunFailed(run, error, "spec");
+      }
+    }
+
     // Preflight failures leave the run in its current state (the user can
     // fix the agent configuration and resume again) — but the lock must
     // never be left behind (audit Finding 2; post-remediation review M1).
     let agents: AgentRoles;
     try {
-      agents = await this.preflightForMode(run.mode);
+      agents = await this.preflightForRun(run);
     } catch (error) {
       await this.releaseRunLock(run.id);
       try {

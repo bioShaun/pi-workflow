@@ -7,6 +7,7 @@ import {
   getRunsDir,
   getRunDir,
   getStateFilePath,
+  resolveRunArtifactPath,
   getRequestFilePath,
   getPlanFilePath,
   getImplementationFilePath,
@@ -126,8 +127,7 @@ export async function saveArtifact(
   filename: string,
   content: string | object
 ): Promise<void> {
-  const runDir = getRunDir(baseDir, runId);
-  const filePath = path.join(runDir, filename);
+  const filePath = resolveRunArtifactPath(baseDir, runId, filename);
   const text = typeof content === "string" ? content : JSON.stringify(content, null, 2);
   await writeAtomic(filePath, text);
 }

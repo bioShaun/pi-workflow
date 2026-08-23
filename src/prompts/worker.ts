@@ -1,19 +1,23 @@
 import type { PlanResult } from "../contracts/plan.ts";
 import type { ScoutResult } from "../contracts/scout.ts";
-import { AUTONOMOUS_EXECUTION_RULE } from "./common.ts";
+import {
+  AUTONOMOUS_EXECUTION_RULE,
+  renderRequirementSection,
+  type SpecRequirementPrompt,
+} from "./common.ts";
 
 export interface BuildWorkerPromptInput {
   task: string;
   plan: PlanResult;
   scout?: ScoutResult;
+  requirement?: SpecRequirementPrompt;
 }
 
 export function buildWorkerPrompt(input: BuildWorkerPromptInput): string {
   const sections: string[] = [
     "You are an implementation worker responsible for executing the approved plan.",
     "",
-    "## Original Requirement",
-    input.task.trim(),
+    ...renderRequirementSection(input.task, input.requirement),
     "",
     "## Approved Plan Summary",
     input.plan.summary,

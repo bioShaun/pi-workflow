@@ -16,28 +16,54 @@ export interface TestGateResult {
 
 export function evaluateTestGate(
   testResults: TestResult[],
-  planTests?: PlanTest[]
+  planTests: PlanTest[] = []
 ): TestGateResult {
-  const failedTests = testResults.filter((t) => t.status === "failed");
-  const skippedTests = testResults.filter((t) => t.status === "skipped");
-  const passedTests = testResults.filter((t) => t.status === "passed");
+  const failedTests = testResults.filter((test) => test.status === "failed");
+  const skippedTests = testResults.filter((test) => test.status === "skipped");
+  const passedTests = testResults.filter((test) => test.status === "passed");
 
-  // If there are plan tests marked as required, check if any failed
   if (failedTests.length > 0) {
     return {
       status: "FIX_REQUIRED",
-      reason: `${failedTests.length} test(s) failed: ${failedTests.map((t) => t.summary).join("; ")}`,
+      reason: `${failedTests.length} test(s) failed: ${failedTests.map((test) => test.summary).join("; ")}`,
       failedTests,
       skippedTests,
       passedTests,
     };
   }
 
-  // Check for required tests that might have been skipped
+  const missingRequired: string[] = [];
+  for (const planned of planTests.filter((test) => test.required)) {
+    const requiredCommand = planned.command?.trim();
+    if (requiredCommand) {
+      const matching = testResults.filter((result) => result.command?.trim() === requiredCommand);
+      if (!matching.some((result) => result.status === "passed")) {
+        const reported = matching[matching.length - 1];
+        missingRequired.push(
+          reported?.status === "skipped"
+            ? `required verification skipped: ${requiredCommand}`
+            : `required verification not reported: ${requiredCommand}`
+        );
+      }
+    } else if (passedTests.length === 0) {
+      missingRequired.push(`required verification not reported: ${planned.description}`);
+    }
+  }
+
+  if (missingRequired.length > 0) {
+    return {
+      status: "FIX_REQUIRED",
+      reason: missingRequired.join("; "),
+      failedTests,
+      skippedTests,
+      passedTests,
+    };
+  }
+
   if (skippedTests.length > 0) {
     return {
       status: "REVIEW_ALLOWED_WITH_WARNING",
-      reason: `${skippedTests.length} test(s) were skipped: ${skippedTests.map((t) => t.summary).join("; ")}`,
+      reason: `${skippedTests.length} optional test(s) were skipped: ${skippedTests.map((test) => test.summary).join("; ")}`,
       failedTests,
       skippedTests,
       passedTests,

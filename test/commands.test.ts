@@ -217,6 +217,38 @@ describe("CLI Parser and UX Renderer", () => {
         maxReviewRounds: 2,
         source: "spec",
         specPath: ".scratch/spec-flow-demo/spec.md",
+        requirement: {
+          kind: "spec",
+          sourcePath: ".scratch/spec-flow-demo/spec.md",
+          artifactPath: "requirement.md",
+          sha256: "abcdef0123456789",
+          characters: 321,
+        },
+        specPolicy: {
+          verification: [
+            { command: "npm test", required: true },
+            { command: "tsc --noEmit", required: true },
+          ],
+          allowedChanges: ["src/utils/truncate.ts"],
+        },
+        verification: {
+          label: "implementation",
+          status: "passed",
+          passed: 2,
+          total: 2,
+          commands: [
+            { command: "npm test", status: "passed", exitCode: 0 },
+            { command: "tsc --noEmit", status: "passed", exitCode: 0 },
+          ],
+          completedAt: "",
+        },
+        scopeGate: {
+          label: "implementation",
+          status: "passed",
+          changed: ["src/utils/truncate.ts"],
+          outOfScope: [],
+          completedAt: "",
+        },
         implementation: {
           summary: "Impl",
           changedFiles: [{ path: "src/utils/truncate.ts", change: "added" }],
@@ -235,14 +267,17 @@ describe("CLI Parser and UX Renderer", () => {
 
       const statusStr = renderStatus(run);
       assert.match(statusStr, /Source: spec \(\.scratch\/spec-flow-demo\/spec\.md\)/);
-      assert.match(statusStr, /Verification\s+2\/2 passed/);
+      assert.match(statusStr, /Requirement: abcdef012345 \(321 chars\)/);
+      assert.match(statusStr, /Verification\s+PASS \(2\/2 commands\)/);
+      assert.match(statusStr, /Scope\s+PASS/);
 
       const compStr = renderCompleted(run);
-      assert.match(compStr, /Verification \(2\/2 passed\):/);
-      assert.match(compStr, /✓ `npm test` — 138 tests, 0 failures/);
-      assert.match(compStr, /✓ `tsc --noEmit` — no errors/);
+      assert.match(compStr, /Engine Verification \(2\/2 passed\):/);
+      assert.match(compStr, /✓ `npm test` — exit 0/);
+      assert.match(compStr, /✓ `tsc --noEmit` — exit 0/);
+      assert.match(compStr, /Agent-reported checks \(informational\):/);
       assert.match(compStr, /Spec: \.scratch\/spec-flow-demo\/spec\.md/);
-      assert.ok(!/Tests:/.test(compStr), "the misleading bare 'Tests:' header must be gone");
+      assert.ok(!/^Tests:/m.test(compStr), "the misleading bare 'Tests:' header must be gone");
     });
 
     it("renderVerificationList lists entries, marks non-pass, and caps at five", () => {

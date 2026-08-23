@@ -118,21 +118,36 @@ Bare `/work` shows help. A first argument that is not a recognized subcommand is
 
 ### Spec-Driven Flow (`/work spec`)
 
-For the common case where the requirement is already written down (for example `.scratch/<feature>/spec.md`), `/work spec <path>` skips the scout and planner agents entirely:
+`/work spec <path>` skips scout/planner and freezes the exact UTF-8 document as the run's immutable `requirement.md`. Worker, fresh reviewers, and fixers receive its run-relative path and SHA-256—not an embedded copy—and must read it before acting.
 
 ```text
-spec document ──(deterministic plan synthesis, no LLM)──► implement → test gate → fresh review ↔ fix loop → completed
+snapshot → implement → scope gate → engine verification → fresh review ↔ fix → completed
 ```
 
-- The spec file is read from disk (relative to the project root or absolute; missing/empty → usage error, >100k characters → split guidance, since the spec is embedded in every node prompt) and embedded verbatim in the run request, so the worker, every fresh reviewer, and the fixer all see the same authoritative requirement.
-- The `PlanResult` is synthesized deterministically by the engine (`synthesizeSpecPlan`); it passes the plan gate by construction and is persisted as `plan.json` like any other run.
-- Preflight requires only the `worker` and `reviewer` agents — scout/planner need not be configured.
-- Review budgets, fresh-reviewer isolation, the fix loop, persistence, and resume behave exactly like `/work auto` (state machine entry: `created → plan_ready`). A spec run records `source: "spec"` + `specPath`; on resume the deterministic plan is restored (state → persisted artifact → re-synthesized from `specPath`) and the automated flow runs to completion — a spec run never falls back to the planner/scout agents.
-- `/work spec <TAB>` completes paths of `spec.md` / `*.spec.md` documents found in the project (`.scratch/<feature>/spec.md` convention).
-- The run source is visible in `/work status` (`Source: spec (path)`), the live widget header (`spec (mode)`), and the completed summary (`Spec: path`); the completed summary renders the worker's verification commands one per line instead of a bare pass count.
+Optional front matter declares mode, ordered commands, and an exact path allowlist:
+
+```yaml
+---
+work:
+  mode: strict
+  verify:
+    - npm test
+    - npm run typecheck
+  changes:
+    allow:
+      - src/engine/engine.ts
+      - test/spec-flow.test.ts
+---
+```
+
+- Mode precedence: explicit CLI flag, then `work.mode`, then `defaultMode`. Invalid/unknown policy, duplicate or empty commands, and unsafe paths fail before run creation.
+- The engine runs every declared command from the project root after implementation and each fix. Real exit codes—not agent reports—control review and completion. Agent-reported checks remain informational.
+- When `changes.allow` exists, actual working-tree hashes are compared with the exact initial baseline. Out-of-scope edits route to fixing; workflow artifacts are excluded; source/snapshot edits always fail.
+- Preflight requires only `worker` and `reviewer`. Resume verifies the immutable snapshot hash before agent execution. Recoverable legacy embedded specs migrate once; unsafe post-mutation recovery fails closed.
+- `/work status` shows source, short requirement hash/size, verification PASS/FAIL/PENDING, and scope PASS/FAIL/NOT_DECLARED. Completion lists engine commands and exit codes separately from agent-reported checks.
+- `/work spec <TAB>` completes project `spec.md` / `*.spec.md` paths.
 
 ---
-
 ## Live Progress
 
 While a workflow command is running, three surfaces report progress:

@@ -16,6 +16,23 @@ export function getRunDir(baseDir: string, runId: string): string {
   return path.join(getRunsDir(baseDir), runId);
 }
 
+/** Resolve a run-relative artifact path and fail closed on path escape. */
+export function resolveRunArtifactPath(
+  baseDir: string,
+  runId: string,
+  artifactPath: string
+): string {
+  if (!artifactPath || path.isAbsolute(artifactPath)) {
+    throw new Error("Run artifact path must be a non-empty relative path");
+  }
+  const runDir = path.resolve(getRunDir(baseDir, runId));
+  const resolved = path.resolve(runDir, artifactPath);
+  if (!resolved.startsWith(`${runDir}${path.sep}`)) {
+    throw new Error(`Run artifact path escapes its owning run: ${artifactPath}`);
+  }
+  return resolved;
+}
+
 export function getStateFilePath(baseDir: string, runId: string): string {
   return path.join(getRunDir(baseDir, runId), "state.json");
 }

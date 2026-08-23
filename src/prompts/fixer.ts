@@ -1,22 +1,29 @@
 import type { PlanResult } from "../contracts/plan.ts";
 import type { ReviewFinding } from "../contracts/review.ts";
 import type { TestResult } from "../contracts/implementation.ts";
-import { AUTONOMOUS_EXECUTION_RULE } from "./common.ts";
+import type { VerificationExecution } from "../contracts/requirement.ts";
+import {
+  AUTONOMOUS_EXECUTION_RULE,
+  renderRequirementSection,
+  type SpecRequirementPrompt,
+} from "./common.ts";
 
 export interface BuildFixerPromptInput {
   task: string;
   plan: PlanResult;
   findings: ReviewFinding[];
   failedTests?: TestResult[];
+  verificationFailures?: VerificationExecution[];
+  outOfScopePaths?: string[];
   round: number;
+  requirement?: SpecRequirementPrompt;
 }
 
 export function buildFixerPrompt(input: BuildFixerPromptInput): string {
   const sections: string[] = [
     "You are a fix worker responsible for addressing review findings and test failures.",
     "",
-    "## Original Requirement",
-    input.task.trim(),
+    ...renderRequirementSection(input.task, input.requirement),
     "",
     "## Approved Plan Summary",
     input.plan.summary,
@@ -39,6 +46,27 @@ export function buildFixerPrompt(input: BuildFixerPromptInput): string {
       ...input.failedTests.map(
         (t) => `- [FAILED] ${t.summary}${t.command ? ` (\`${t.command}\`)` : ""}`
       )
+    );
+  }
+
+  if (input.verificationFailures && input.verificationFailures.length > 0) {
+    sections.push(
+      "",
+      "## Engine Verification Failures",
+      ...input.verificationFailures.map((result) => [
+        `- \`${result.command}\` exited ${result.exitCode}`,
+        result.stdout ? `  stdout: ${result.stdout}` : "",
+        result.stderr ? `  stderr: ${result.stderr}` : "",
+      ].filter(Boolean).join("\n"))
+    );
+  }
+
+  if (input.outOfScopePaths && input.outOfScopePaths.length > 0) {
+    sections.push(
+      "",
+      "## Out-of-Scope Repository Changes",
+      ...input.outOfScopePaths.map((filePath) => `- \`${filePath}\``),
+      "Restore or relocate these changes so the actual working tree matches the allowlist."
     );
   }
 

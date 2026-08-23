@@ -503,13 +503,17 @@ Recommended layout:
             ├── state.json
             ├── events.jsonl
             ├── request.md
+            ├── requirement.md          # exact immutable spec bytes
             ├── plan.json
             ├── implementation.json
-            ├── reviews/
-            │   ├── review-1.json
-            │   └── review-2.json
-            ├── fixes/
+            ├── verification/
+            │   ├── implementation.json
             │   └── fix-1.json
+            ├── scope/
+            │   ├── implementation.json
+            │   └── fix-1.json
+            ├── reviews/
+            ├── fixes/
             └── final.json
 ```
 
@@ -575,6 +579,16 @@ interface WorkflowRun {
 
   /** Spec document path (relative to cwd); present only for source === "spec". */
   specPath?: string;
+
+  /** Immutable spec metadata; full bytes live only at artifactPath. */
+  requirement?: RequirementSnapshot;
+
+  /** Parsed verification commands and optional exact change allowlist. */
+  specPolicy?: SpecPolicy;
+
+  /** Latest bounded engine verification and actual-scope aggregates. */
+  verification?: VerificationAggregate;
+  scopeGate?: ScopeAggregate;
 }
 ```
 
@@ -618,15 +632,19 @@ Events emitted by the v0.1 implementation (audit Finding 11 added the node lifec
 pairs so resume can distinguish "node completed" from "node interrupted"):
 
 ```text
-workflow.created
-node.started / node.completed     (once per logical node, including strict reviewers A/B/final; retries within a node do not re-emit the pair)
+workflow.created                  (compact source/mode/requirement/policy metadata)
+node.started / node.completed     (once per logical node)
 node.failed
-state.changed                     (from / to / node / reason, written by the state machine)
-gate.test                         (test-gate status and reason)
-mode.resolved                      (auto-routed mode finalization, Finding 6)
-planner.fork_unavailable           (Finding 1 fork degradation)
-spec.loaded                        (spec-driven entry /work spec: spec path + size; plan synthesized deterministically)
-workflow.preflight_failed          (resume path that cannot preflight)
+state.changed                     (from / to / node / reason)
+gate.test                         (legacy non-spec agent-report gate)
+gate.verification.started         (ordered command metadata; no output)
+gate.verification                 (bounded command/exit aggregate)
+gate.scope                        (changed and out-of-scope paths)
+spec.loaded                       (snapshot path/hash/size/policy metadata)
+spec.snapshot_migrated            (one-time legacy migration metadata)
+mode.resolved
+planner.fork_unavailable
+workflow.preflight_failed
 workflow.failed
 ```
 
@@ -1304,47 +1322,31 @@ The mode is the explicit flag or `defaultMode`. Complexity routing (§25) applie
 
 ## `/work spec <spec-path>`
 
-The spec-driven entry for the simplest flow (execute → review → fix): the
-requirement is already written down, so no scout or planner agent runs at all.
+The spec-driven entry skips scout/planner and uses the same bounded implementation/review/fix state machine with deterministic gates before every review.
 
-Behavior:
+Startup order is strict: resolve/read/validate the UTF-8 document; parse the narrow `work` front matter; hash the exact bytes; resolve mode (`CLI > work.mode > defaultMode`); preflight only worker/reviewer; create the run identity; atomically persist `requirement.md`; capture the exact working-tree baseline; then synthesize `plan.json` and execute.
 
-```text
-read the spec file (relative to cwd or absolute; missing/empty → usage error, no run created;
-    > 100k characters → fail with split guidance — the spec is embedded in every node prompt)
-preflight worker + reviewer only (scout/planner agents need not be configured)
-create run (source = "spec", specPath recorded); request = one-line preamble + the spec
-    content verbatim between --- SPECIFICATION BEGIN --- / --- SPECIFICATION END --- markers
-synthesize PlanResult deterministically (synthesizeSpecPlan; no LLM call)
-persist plan.json + request.md; emit spec.loaded
-state = plan_ready via the created → plan_ready transition
-run the shared /work auto tail: implement → test gate → fresh review ↔ fix loop
+The optional policy shape is:
+
+```yaml
+work:
+  mode: quick | normal | strict
+  verify: [ordered non-empty command block list]
+  changes:
+    allow: [ordered normalized project-relative path block list]
 ```
 
-The spec embedded in the run request is the authoritative plan: the worker,
-every fresh reviewer, and the fixer each receive it through the
-"Original Requirement" prompt section. Review budgets, reviewer freshness,
-fix-loop bounds, and persistence are identical to `/work auto`.
+Unknown keys, invalid modes, empty/duplicate commands, empty/duplicate paths, absolute paths, and traversal fail before run creation. Without front matter, verification defaults to `npm test` and scope is not declared.
 
-Resume: a spec run (`source === "spec"`) interrupted in `created`/`planning`
-never falls back to the planner/scout agents — `restoreSpecPlan` rebuilds the
-deterministic plan (in-memory state → persisted `plan.json` artifact →
-re-synthesized from `specPath`; none available → safe `state_corrupt` failure)
-and then runs the automated flow to completion. A run without `specPath` and
-without a plan fails safely instead of guessing.
+`state.json` stores only requirement path/hash/size and normalized policy. Worker, reviewer, and fixer prompts carry the original source path, immutable run-relative snapshot path, SHA-256, commands, and scope—not the document body. Both documents are read-only.
 
-Argument completion: after the `spec ` subcommand, the command layer
-completes paths of `spec.md` / `*.spec.md` documents found under the project
-root (`findSpecFileCompletions`, sync scan with dir-denylist and budget).
+After implementation and every fix, an allowlisted run compares actual working-tree hashes against its initial baseline. Scope failure routes directly to fixing. Once scope passes, the engine executes every declared command in order from `cwd`; any non-zero exit routes directly to fixing without consuming a review round. Only passing engine evidence permits review/completion; agent-reported checks are informational.
 
-Surfacing: the run source is shown by `/work status` (`Source: spec (path)`),
-the live widget header (`spec (<mode>)`), and the completed summary
-(`Spec: <path>`); the completed summary renders the worker's verification
-commands one per line (`renderVerificationList`) instead of a bare pass count,
-because those entries are verification commands, not individual test cases.
+Resume validates snapshot containment/readability/hash before agent execution and never rereads the source for new-format runs. Legacy embedded specs migrate once. Source fallback is allowed only before any mutating node started; otherwise recovery fails with `requirement_corrupt`.
+
+Status exposes requirement identity, verification PASS/FAIL/PENDING and count, and scope PASS/FAIL/NOT_DECLARED. Completion lists engine commands/exit codes separately from agent reports. `/work spec <TAB>` completes project `spec.md` / `*.spec.md` paths.
 
 ---
-
 ## `/work implement`
 
 Requires:
@@ -2865,6 +2867,25 @@ pi-subagents owns child-agent execution.
 
 ```text
 User repository changes are preserved unless the user explicitly requests otherwise.
+```
+
+### Invariant 7
+
+```text
+A spec run's immutable snapshot—not its mutable source or agent prose—is authoritative.
+```
+
+### Invariant 8
+
+```text
+Required verification means ordered engine executions with real zero exit codes.
+Missing evidence never means success.
+```
+
+### Invariant 9
+
+```text
+Declared scope is checked against actual working-tree hashes, never agent-reported files.
 ```
 
 ---

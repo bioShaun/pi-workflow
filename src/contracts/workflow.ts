@@ -2,6 +2,12 @@ import type { PlanResult } from "./plan.ts";
 import type { ImplementationResult } from "./implementation.ts";
 import type { ReviewResult } from "./review.ts";
 import type { FixResult } from "./fix.ts";
+import type {
+  RequirementSnapshot,
+  SpecPolicy,
+  VerificationAggregate,
+  ScopeAggregate,
+} from "./requirement.ts";
 
 export type WorkflowState =
   | "created"
@@ -38,6 +44,11 @@ export type WorkflowErrorCode =
   | "state_corrupt"
   | "workflow_aborted"
   | "incomplete_node"
+  | "invalid_spec"
+  | "requirement_corrupt"
+  | "verification_failed"
+  | "scope_violation"
+  | "scope_check_failed"
   | "unknown";
 
 export interface WorkflowErrorDetails {
@@ -47,12 +58,29 @@ export interface WorkflowErrorDetails {
   details?: unknown;
 }
 
+/**
+ * One path in the captured working-tree index. `hash` is the SHA-256 of the
+ * file content at capture time; `null` marks a path that was absent from the
+ * working tree then (tracked-but-deleted). Content itself is never stored.
+ */
+export interface BaselineFileEntry {
+  path: string;
+  hash: string | null;
+}
+
 export interface RepositoryBaseline {
   head?: string;
   branch?: string;
   dirty: boolean;
   status: string[];
   startedAt: string;
+  /**
+   * Per-path content hashes of the exact initial working tree (spec-driven
+   * change-scope gate). Absent when the working tree could not be indexed
+   * reliably (e.g. non-git) — the scope gate then fails closed instead of
+   * passing. Only hashes are stored, never file contents.
+   */
+  files?: BaselineFileEntry[];
 }
 
 export interface WorkflowRun {
@@ -95,6 +123,21 @@ export interface WorkflowRun {
 
   /** Spec document path (relative to cwd); present only for source === "spec". */
   specPath?: string;
+
+  /**
+   * Immutable requirement snapshot (source === "spec"). Metadata only — the
+   * full document bytes live exactly once under the run directory.
+   */
+  requirement?: RequirementSnapshot;
+
+  /** Machine-readable spec policy (verification commands, allowed change scope). */
+  specPolicy?: SpecPolicy;
+
+  /** Latest engine-executed verification aggregate (bounded; no raw output). */
+  verification?: VerificationAggregate;
+
+  /** Latest actual change-scope aggregate (bounded). */
+  scopeGate?: ScopeAggregate;
 }
 
 export interface WorkflowConfig {

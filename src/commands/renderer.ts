@@ -86,6 +86,9 @@ export function renderStatus(run: WorkflowRun | null): string {
     `Run: ${run.id}`,
     `Mode: ${run.mode}`,
     ...(run.source ? [`Source: ${run.source}${run.specPath ? ` (${run.specPath})` : ""}`] : []),
+    ...(run.source === "spec" && run.requirement
+      ? [`Requirement: ${run.requirement.sha256.slice(0, 12)} (${run.requirement.characters} chars)`]
+      : []),
     `State: ${run.state}`,
     ...(run.currentNode ? [`Current node: ${run.currentNode}`] : []),
     `Started: ${run.createdAt}`,
@@ -100,14 +103,25 @@ export function renderStatus(run: WorkflowRun | null): string {
     lines.push("Plan           PENDING");
   }
 
-  // Implementation status
+  // Implementation and verification status
   if (run.implementation) {
-    const passedTests = run.implementation.tests.filter((t) => t.status === "passed").length;
-    const totalTests = run.implementation.tests.length;
     lines.push(`Implementation PASS (${run.implementation.changedFiles.length} file(s) changed)`);
-    lines.push(`Verification    ${passedTests}/${totalTests} passed`);
   } else {
     lines.push("Implementation PENDING");
+  }
+  if (run.source === "spec") {
+    const verificationStatus = run.verification
+      ? (run.verification.status === "passed" ? "PASS" : "FAIL")
+      : "PENDING";
+    lines.push(
+      `Verification   ${verificationStatus} (${run.verification?.passed ?? 0}/${run.verification?.total ?? run.specPolicy?.verification.length ?? 0} commands)`
+    );
+    lines.push(
+      `Scope          ${run.specPolicy?.allowedChanges ? (run.scopeGate ? (run.scopeGate.status === "passed" ? "PASS" : "FAIL") : "PENDING") : "NOT_DECLARED"}`
+    );
+  } else if (run.implementation) {
+    const passedTests = run.implementation.tests.filter((test) => test.status === "passed").length;
+    lines.push(`Verification   ${passedTests}/${run.implementation.tests.length} passed`);
   }
 
   // Review status
@@ -149,24 +163,42 @@ export function renderCompleted(run: WorkflowRun): string {
 
   const passedTests = latestTests.filter((t) => t.status === "passed").length;
 
-  const lines = [
-    `pi-workflow · completed`,
+  const lines: string[] = [
+    "pi-workflow · completed",
     "",
     "Changed Files:",
-    ...changedFiles.map((f) => `- ${f.path}`),
+    ...changedFiles.map((file) => `- ${file.path}`),
     "",
-    // These are the worker's reported verification commands/results, not
-    // individual test cases (see renderVerificationList).
-    `Verification (${passedTests}/${latestTests.length} passed):`,
-    ...renderVerificationList(latestTests),
-    "",
+  ];
+  if (run.source === "spec") {
+    lines.push(
+      `Engine Verification (${run.verification?.passed ?? 0}/${run.verification?.total ?? 0} passed):`,
+      ...(run.verification?.commands.map(
+        (result) => `${result.status === "passed" ? "✓" : "✗"} \`${result.command}\` — exit ${result.exitCode}`
+      ) ?? ["– no engine verification evidence"]),
+      "",
+      "Agent-reported checks (informational):",
+      ...renderVerificationList(latestTests),
+      ""
+    );
+  } else {
+    lines.push(
+      `Verification (${passedTests}/${latestTests.length} passed):`,
+      ...renderVerificationList(latestTests),
+      ""
+    );
+  }
+  lines.push(
     "Review:",
     `✓ PASS after ${run.reviewRound} round(s)`,
     "",
-    `Run: ${run.id}`,
-  ];
+    `Run: ${run.id}`
+  );
   if (run.source === "spec" && run.specPath) {
     lines.push(`Spec: ${run.specPath}`);
+  }
+  if (run.source === "spec" && run.requirement) {
+    lines.push(`Requirement: ${run.requirement.sha256.slice(0, 12)} (${run.requirement.characters} chars)`);
   }
   return lines.join("\n");
 }
@@ -180,12 +212,20 @@ export function renderAborted(run: WorkflowRun): string {
   ].join("\n");
 }
 
-/** Render a failed run (audit Finding 2: failures are persisted and surfaced). */
+/** Render a failed run with the persisted machine-readable cause. */
 export function renderRunError(run: WorkflowRun): string {
   const code = run.error?.code ?? "unknown";
   const message = run.error?.message ?? "Unknown error";
   const nodeId = run.error?.nodeId ? ` (node: ${run.error.nodeId})` : "";
-  return `Workflow failed [${code}]${nodeId}: ${message}\nRun: ${run.id}\nUse /work status for details, /work abort to release the run.`;
+  const cause: Partial<Record<NonNullable<WorkflowRun["error"]>["code"], string>> = {
+    required_tests_failed: "Required verification exhausted",
+    scope_violation: "Repository scope violation",
+    scope_check_failed: "Repository scope comparison failed",
+    requirement_corrupt: "Immutable requirement is corrupt",
+    verification_failed: "Verification infrastructure failed",
+    preflight_failed: "Required agent role unavailable",
+  };
+  return `Workflow failed [${code}]${nodeId}: ${cause[code] ?? "Workflow failure"}\n${message}\nRun: ${run.id}\nUse /work status for details, /work abort to release the run.`;
 }
 
 export interface TraceLineOptions {

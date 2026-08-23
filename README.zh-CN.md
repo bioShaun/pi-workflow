@@ -118,19 +118,35 @@ pi list      # 应能看到 pi-workflow
 
 ### 规格驱动流程（`/work spec`）
 
-针对「需求已经写好了」的常见场景（例如 `.scratch/<feature>/spec.md`），`/work spec <path>` 完全跳过 scout 和 planner agent：
+`/work spec <path>` 完全跳过 scout/planner，并把原始 UTF-8 文档冻结为 run 内不可变的 `requirement.md`。worker、每个 fresh reviewer 和 fixer 收到的是 run 相对路径与 SHA-256，而不是重复嵌入的全文；执行前必须完整读取快照。
 
 ```text
-spec 文档 ──(确定性合成计划，无 LLM)──► implement → test gate → fresh review ↔ fix loop → completed
+不可变快照 → implement → 变更范围门禁 → 引擎验证 → fresh review ↔ fix → completed
 ```
 
-- spec 文件从磁盘读取（相对项目根或绝对路径），原样嵌入 run 请求，worker、每个 fresh 审查者、fixer 看到的是同一份权威需求。
-- `PlanResult` 由引擎确定性合成（`synthesizeSpecPlan`），天然通过 plan gate，并像其他 run 一样持久化为 `plan.json`。
-- 预检只需要 `worker` 和 `reviewer` 两个 agent——无需配置 scout/planner。
-- 审查预算、fresh 审查者隔离、修复循环、持久化与恢复行为均与 `/work auto` 完全一致（状态机入口：`created → plan_ready`）。
+可选 front matter 可声明模式、有序验证命令和精确路径白名单：
+
+```yaml
+---
+work:
+  mode: strict
+  verify:
+    - npm test
+    - npm run typecheck
+  changes:
+    allow:
+      - src/engine/engine.ts
+      - test/spec-flow.test.ts
+---
+```
+
+- 模式优先级：显式 CLI 参数、`work.mode`、`defaultMode`。未知/非法策略、空命令或重复命令、不安全路径都会在创建 run 前失败。
+- 引擎在实现及每次修复后，从项目根按声明顺序执行全部命令；真实退出码决定是否进入审查及能否完成。agent 自报检查仅作参考。
+- 声明 `changes.allow` 后，引擎按初始工作树的精确哈希检查真实变更；越界修改进入修复，工作流自身产物不计入范围，源 spec 与快照不得修改。
+- 预检只要求 `worker` 与 `reviewer`。恢复前校验不可变快照哈希；可恢复的旧式内嵌 spec 只迁移一次，变更发生后无法确认权威需求时安全失败。
+- `/work status` 显示来源、需求短哈希/大小、验证 PASS/FAIL/PENDING 与范围 PASS/FAIL/NOT_DECLARED；完成输出把引擎命令及退出码与 agent 自报检查分开。
 
 ---
-
 ## 实时进度
 
 工作流命令运行期间，有三个界面汇报进度：
