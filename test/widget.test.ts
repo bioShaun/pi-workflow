@@ -11,6 +11,21 @@ describe("Live Widget Component & Keybindings (Ticket 03)", () => {
     assert.equal(isCtrlO("\n"), false);
   });
 
+  it("detects Ctrl+O in kitty protocol and modifyOtherKeys encodings", () => {
+    // kitty CSI-u press: codepoint 111 ('o'), modifier 5 (ctrl)
+    assert.equal(isCtrlO("\x1b[111;5u"), true);
+    // kitty CSI-u with alternate keys (flag 4)
+    assert.equal(isCtrlO("\x1b[111;5:1u"), true);
+    // xterm modifyOtherKeys: ESC 27;5;111~
+    assert.equal(isCtrlO("\x1b[27;5;111~"), true);
+    // release events must not toggle (input listeners run before the TUI release filter)
+    assert.equal(isCtrlO("\x1b[111;5:3u"), false);
+    // other ctrl combos and plain sequences must not match
+    assert.equal(isCtrlO("\x1b[105;5u"), false); // ctrl+i
+    assert.equal(isCtrlO("\x1b[111u"), false); // 'o' without ctrl
+    assert.equal(isCtrlO("\x1b[111;1:3u"), false); // 'o' release, no ctrl
+  });
+
   it("handles state updates and render-key diffing", () => {
     const widget = new WorkflowLiveWidget({
       runId: "wf_test",

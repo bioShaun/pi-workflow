@@ -1,14 +1,22 @@
 import type { Component, TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { renderLiveWidget, type WidgetState, type ThemeHelper } from "./widget-renderer.ts";
 import type { WorkflowUI } from "./ui-port.ts";
 
 export const WIDGET_KEY = "pi-workflow-live";
 
 /**
- * Check if the input key is Ctrl+O (ASCII 15)
+ * Check if the input key is Ctrl+O.
+ *
+ * Terminals that negotiated the kitty keyboard protocol or xterm
+ * modifyOtherKeys deliver Ctrl+O as an escape sequence (e.g. "\x1b[111;5u"
+ * or "\x1b[27;5;111~") instead of the raw 0x0F byte, so matching must go
+ * through pi-tui's matchesKey. Release events are ignored: input listeners
+ * run before the TUI's own release filter.
  */
 export function isCtrlO(data: string): boolean {
-  return data === "\x0f" || data === "\u000f";
+  if (!data || isKeyRelease(data)) return false;
+  return matchesKey(data, "ctrl+o");
 }
 
 export class WorkflowLiveWidget {
@@ -66,7 +74,6 @@ export class WorkflowLiveWidget {
   public handleTerminalInput(data: string): { consume?: boolean; data?: string } | undefined {
     if (this.isDisposed) return undefined;
     if (isCtrlO(data)) {
-      console.error("[pi-workflow] handleTerminalInput: Ctrl+O detected, toggling expanded");
       this.state.expanded = !this.state.expanded;
       this.requestRenderIfChanged();
       return { consume: true };
@@ -105,9 +112,7 @@ export class WorkflowLiveWidget {
 
     // Subscribe to Ctrl+O terminal input
     if (ui.onTerminalInput) {
-      console.error("[pi-workflow] widget.attach: registering terminal input handler");
       this.unsubscribeInput = ui.onTerminalInput((data) => this.handleTerminalInput(data));
-      console.error(`[pi-workflow] widget.attach: handler registered, unsubscribe is ${typeof this.unsubscribeInput}`);
     }
 
     // Start 500ms spinner ticker
