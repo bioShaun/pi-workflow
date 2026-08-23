@@ -1,14 +1,22 @@
 import * as crypto from "node:crypto";
-import {
-  SUBAGENT_DELEGATION_REQUEST_EVENT,
-  SUBAGENT_DELEGATION_UPDATE_EVENT,
-  SUBAGENT_DELEGATION_RESPONSE_EVENT,
-  SUBAGENT_DELEGATION_CANCEL_EVENT,
-  type SubagentDelegationRequest,
-  type SubagentDelegationUpdate,
-  type SubagentDelegationResponse,
-  type SubagentDelegationCancel,
+import type {
+  SubagentDelegationRequest,
+  SubagentDelegationUpdate,
+  SubagentDelegationResponse,
+  SubagentDelegationCancel,
 } from "pi-subagents/delegation";
+
+// The delegation transport is string events on the Pi event bus, so this
+// adapter needs nothing from pi-subagents at runtime: a git-installed
+// extension cannot resolve the package at all (its clone sits outside the
+// npm store's node_modules), and Node refuses to strip types under
+// node_modules regardless. The type-only import above is erased; these
+// constants must match pi-subagents/delegation.ts — a drift would emit
+// events no responder listens for (test/progress.test.ts pins the values).
+const SUBAGENT_DELEGATION_REQUEST_EVENT = "prompt-template:subagent:request";
+const SUBAGENT_DELEGATION_UPDATE_EVENT = "prompt-template:subagent:update";
+const SUBAGENT_DELEGATION_RESPONSE_EVENT = "prompt-template:subagent:response";
+const SUBAGENT_DELEGATION_CANCEL_EVENT = "prompt-template:subagent:cancel";
 import type {
   AgentExecutor,
   AgentExecutionRequest,
