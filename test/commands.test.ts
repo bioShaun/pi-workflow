@@ -14,6 +14,7 @@ import {
   renderAborted,
   renderTraceLine,
   formatWorkingBreadcrumb,
+  renderVerificationList,
 } from "../src/commands/renderer.ts";
 import type { WorkflowProgressEvent } from "../src/engine/engine.ts";
 import type { WorkflowRun } from "../src/contracts/workflow.ts";
@@ -47,7 +48,9 @@ registerHooks({
   },
 });
 
-const { registerWorkCommand, createProgressNotifier } = await import("../src/commands/work.ts");
+const { registerWorkCommand, createProgressNotifier, findSpecFileCompletions } = await import(
+  "../src/commands/work.ts"
+);
 
 describe("CLI Parser and UX Renderer", () => {
   describe("Parser", () => {
@@ -198,6 +201,85 @@ describe("CLI Parser and UX Renderer", () => {
       assert.match(compStr, /pi-workflow · completed/);
       assert.match(compStr, /src\/foo\.ts/);
       assert.match(compStr, /PASS after 2 round\(s\)/);
+    });
+
+    it("renders the run source and per-entry verification for spec runs", () => {
+      const run: WorkflowRun = {
+        version: 1,
+        id: "wf_20260822_230539_d39c",
+        cwd: "/tmp",
+        createdAt: "",
+        updatedAt: "",
+        state: "completed",
+        mode: "quick",
+        request: "Spec-driven workflow: ...",
+        reviewRound: 1,
+        maxReviewRounds: 2,
+        source: "spec",
+        specPath: ".scratch/spec-flow-demo/spec.md",
+        implementation: {
+          summary: "Impl",
+          changedFiles: [{ path: "src/utils/truncate.ts", change: "added" }],
+          // Verification commands, NOT individual test cases (smoke-test finding)
+          tests: [
+            { command: "npm test", status: "passed", summary: "138 tests, 0 failures" },
+            { command: "tsc --noEmit", status: "passed", summary: "no errors" },
+          ],
+          unresolvedIssues: [],
+          deviationsFromPlan: [],
+        },
+        reviews: [],
+        fixes: [],
+        baseline: { dirty: false, status: [], startedAt: "" },
+      };
+
+      const statusStr = renderStatus(run);
+      assert.match(statusStr, /Source: spec \(\.scratch\/spec-flow-demo\/spec\.md\)/);
+      assert.match(statusStr, /Verification\s+2\/2 passed/);
+
+      const compStr = renderCompleted(run);
+      assert.match(compStr, /Verification \(2\/2 passed\):/);
+      assert.match(compStr, /✓ `npm test` — 138 tests, 0 failures/);
+      assert.match(compStr, /✓ `tsc --noEmit` — no errors/);
+      assert.match(compStr, /Spec: \.scratch\/spec-flow-demo\/spec\.md/);
+      assert.ok(!/Tests:/.test(compStr), "the misleading bare 'Tests:' header must be gone");
+    });
+
+    it("renderVerificationList lists entries, marks non-pass, and caps at five", () => {
+      assert.deepEqual(renderVerificationList([]), ["– none reported"]);
+
+      const entries = Array.from({ length: 7 }, (_, i) => ({
+        status: i === 3 ? ("failed" as const) : ("passed" as const),
+        summary: `entry ${i}`,
+      }));
+      const lines = renderVerificationList(entries);
+      assert.equal(lines.length, 6); // 5 entries + overflow line
+      assert.match(lines[3], /^✗ entry 3/);
+      assert.match(lines[5], /\+2 more/);
+    });
+
+    it("finds spec file completions following the repo convention", async () => {
+      const { fs, path, os } = await import("node:fs/promises").then(async (fsp) => ({
+        fs: fsp,
+        path: await import("node:path"),
+        os: await import("node:os"),
+      }));
+      const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pi-wf-completion-"));
+      await fs.mkdir(path.join(tmp, ".scratch", "widget"), { recursive: true });
+      await fs.mkdir(path.join(tmp, ".scratch", "metrics"), { recursive: true });
+      await fs.mkdir(path.join(tmp, "node_modules", "pkg"), { recursive: true });
+      await fs.mkdir(path.join(tmp, "docs"), { recursive: true });
+      await fs.writeFile(path.join(tmp, ".scratch", "widget", "spec.md"), "# s");
+      await fs.writeFile(path.join(tmp, ".scratch", "metrics", "spec.md"), "# s");
+      await fs.writeFile(path.join(tmp, "node_modules", "pkg", "spec.md"), "# s");
+      await fs.writeFile(path.join(tmp, "docs", "api.spec.md"), "# s");
+      await fs.writeFile(path.join(tmp, "README.md"), "# r");
+
+      const all = findSpecFileCompletions(tmp, "");
+      assert.deepEqual(all, [".scratch/metrics/spec.md", ".scratch/widget/spec.md", "docs/api.spec.md"]);
+
+      const partial = findSpecFileCompletions(tmp, ".scratch/w");
+      assert.deepEqual(partial, [".scratch/widget/spec.md"]);
     });
 
     it("renders compact trace lines (Claude Code style)", () => {

@@ -3,6 +3,8 @@ export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", 
 export interface WidgetState {
   runId: string;
   mode: "quick" | "normal" | "strict";
+  /** Header label naming the workflow entry point; defaults to "auto". */
+  label?: string;
   node: string;
   agent: string;
   action: string;
@@ -66,7 +68,7 @@ export function renderLiveWidget(
   const lines: string[] = [];
 
   // 1. Header Banner
-  const headerLeft = `${colorize("accent", glyph)} [pi-workflow] auto (${state.mode})`;
+  const headerLeft = `${colorize("accent", glyph)} [pi-workflow] ${state.label ?? "auto"} (${state.mode})`;
   const durStr = state.durationMs ? ` · ${formatDuration(state.durationMs)}` : "";
   const tokStr = formatTokens(state.tokens);
   const headerRight = `node: ${state.node}${durStr} · ${tokStr}`;

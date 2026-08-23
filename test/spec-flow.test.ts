@@ -7,7 +7,8 @@ import { WorkflowEngine, synthesizeSpecPlan } from "../src/engine/engine.ts";
 import { canTransition } from "../src/engine/transitions.ts";
 import { FakeAgentExecutor } from "./fake-executor.ts";
 import { validateWorkflowPreflight } from "../src/agents/preflight.ts";
-import { DEFAULT_WORKFLOW_CONFIG } from "../src/contracts/workflow.ts";
+import { DEFAULT_WORKFLOW_CONFIG, type WorkflowRun } from "../src/contracts/workflow.ts";
+import { saveWorkflowRun, saveArtifact } from "../src/storage/store.ts";
 import { evaluatePlanGate } from "../src/gates/plan-gate.ts";
 
 describe("Spec-Driven Workflow (/work spec)", () => {
@@ -198,5 +199,98 @@ describe("Spec-Driven Workflow (/work spec)", () => {
     assert.equal(plan.tests[0].required, true);
     assert.ok(plan.steps.length >= 3);
     assert.equal(plan.complexity, "medium");
+  });
+
+  it("persists source and specPath on the run record", async () => {
+    const specPath = await writeSpec("# Spec\n\nDo the thing.");
+    const engine = new WorkflowEngine({ cwd: tmpDir, executor: new FakeAgentExecutor() });
+
+    const run = await engine.startSpec(specPath);
+
+    assert.equal(run.source, "spec");
+    assert.equal(run.specPath, "spec.md");
+  });
+
+  it("rejects an oversized spec before creating any run", async () => {
+    const specPath = await writeSpec("# Big\n\n" + "x".repeat(100_001));
+    const fakeExecutor = new FakeAgentExecutor();
+    const engine = new WorkflowEngine({ cwd: tmpDir, executor: fakeExecutor });
+
+    await assert.rejects(engine.startSpec(specPath), /too large/);
+    assert.deepEqual(await engine.listRuns(), []);
+    assert.equal(await engine.getActiveRun(), null);
+  });
+
+  /** Craft a persisted spec-driven run in an interrupted state. */
+  async function craftSpecRun(state: "created" | "planning", extra?: Partial<WorkflowRun>): Promise<string> {
+    const runId = `wf_spec_resume_${state}_${Math.random().toString(16).slice(2, 6)}`;
+    const now = new Date().toISOString();
+    const run: WorkflowRun = {
+      version: 1,
+      id: runId,
+      cwd: tmpDir,
+      createdAt: now,
+      updatedAt: now,
+      state,
+      mode: "quick",
+      request: 'Spec-driven workflow: implement the specification document "spec.md".',
+      reviewRound: 1,
+      maxReviewRounds: 2,
+      reviews: [],
+      fixes: [],
+      baseline: { dirty: false, status: [], startedAt: now },
+      autoRouted: false,
+      modeResolved: true,
+      source: "spec",
+      specPath: "spec.md",
+      ...extra,
+    };
+    await saveWorkflowRun(path.join(tmpDir, ".pi", "workflow"), run);
+    return runId;
+  }
+
+  it("resume restores the deterministic spec plan without running planner or scout", async () => {
+    await writeSpec("# Spec\n\nResumed work.");
+    const runId = await craftSpecRun("created");
+    const fakeExecutor = new FakeAgentExecutor();
+    const engine = new WorkflowEngine({ cwd: tmpDir, executor: fakeExecutor });
+
+    const run = await engine.resume(runId);
+
+    assert.equal(run.state, "completed");
+    const nodeIds = fakeExecutor.requests.map((r) => r.nodeId);
+    assert.ok(!nodeIds.includes("plan"), "resume must not run the planner for a spec run");
+    assert.ok(!nodeIds.includes("scout"), "resume must not run the scout for a spec run");
+    assert.ok(nodeIds.includes("implement"));
+    assert.ok(nodeIds.includes("review-1"));
+  });
+
+  it("resume loads a persisted plan.json artifact for an interrupted spec run", async () => {
+    await writeSpec("# Spec\n\nResumed work.");
+    const runId = await craftSpecRun("planning");
+    // Simulate: plan was synthesized and persisted, then the process died
+    // before the plan_ready transition (run.plan absent from state.json).
+    await saveArtifact(path.join(tmpDir, ".pi", "workflow"), runId, "plan.json", synthesizeSpecPlan("spec.md"));
+
+    const fakeExecutor = new FakeAgentExecutor();
+    const engine = new WorkflowEngine({ cwd: tmpDir, executor: fakeExecutor });
+
+    const run = await engine.resume(runId);
+
+    assert.equal(run.state, "completed");
+    assert.ok(run.plan);
+    assert.ok(fakeExecutor.requests.every((r) => r.nodeId !== "plan" && r.nodeId !== "scout"));
+  });
+
+  it("resume fails safely when a spec run has no plan and no specPath", async () => {
+    await writeSpec("# Spec\n\nUnrecoverable.");
+    const runId = await craftSpecRun("created", { specPath: undefined });
+
+    const engine = new WorkflowEngine({ cwd: tmpDir, executor: new FakeAgentExecutor() });
+    const run = await engine.resume(runId);
+
+    assert.equal(run.state, "failed");
+    assert.equal(run.error?.code, "state_corrupt");
+    assert.equal(await engine.getActiveRun(), null);
   });
 });

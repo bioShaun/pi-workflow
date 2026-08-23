@@ -282,7 +282,12 @@ export class WorkflowEngine {
     return preflight.agents ?? { ...this.config.agents };
   }
 
-  private async createRun(request: string, initialMode: WorkflowMode, autoRouted: boolean): Promise<WorkflowRun> {
+  private async createRun(
+    request: string,
+    initialMode: WorkflowMode,
+    autoRouted: boolean,
+    origin?: { source: "auto" | "plan" | "spec"; specPath?: string }
+  ): Promise<WorkflowRun> {
     const runId = generateWorkflowRunId();
     await this.acquireRunLock(runId);
 
@@ -305,13 +310,21 @@ export class WorkflowEngine {
       baseline,
       autoRouted,
       modeResolved: !autoRouted,
+      source: origin?.source,
+      specPath: origin?.specPath,
     };
 
     await saveWorkflowRun(this.baseDir, run);
     await appendWorkflowEvent(this.baseDir, run.id, {
       event: "workflow.created",
       state: "created",
-      details: { mode: run.mode, autoRouted, maxReviewRounds: run.maxReviewRounds, request },
+      details: {
+        mode: run.mode,
+        autoRouted,
+        maxReviewRounds: run.maxReviewRounds,
+        source: origin?.source,
+        request,
+      },
     });
 
     return run;
@@ -326,6 +339,20 @@ export class WorkflowEngine {
       const raw = await fs.readFile(path.join(getRunDir(this.baseDir, runId), "scout.json"), "utf-8");
       const validation = validateScoutResult(JSON.parse(raw));
       return validation.ok ? validation.data : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Re-hydrate a persisted plan artifact (spec-driven resume). Returns
+   * undefined when absent or failing the plan gate.
+   */
+  private async loadPlanArtifact(runId: string): Promise<PlanResult | undefined> {
+    try {
+      const raw = await fs.readFile(path.join(getRunDir(this.baseDir, runId), "plan.json"), "utf-8");
+      const gate = evaluatePlanGate(JSON.parse(raw));
+      return gate.pass && gate.plan ? gate.plan : undefined;
     } catch {
       return undefined;
     }
@@ -1289,7 +1316,7 @@ export class WorkflowEngine {
    */
   private async planPhase(
     request: string,
-    options?: { mode?: WorkflowMode; autoRoute?: boolean }
+    options?: { mode?: WorkflowMode; autoRoute?: boolean; source?: "auto" | "plan" }
   ): Promise<{ run: WorkflowRun; agents: AgentRoles }> {
     const explicitMode = options?.mode;
     const autoRouted = (options?.autoRoute ?? false) && explicitMode === undefined;
@@ -1299,7 +1326,9 @@ export class WorkflowEngine {
     // The resolved mapping serves the whole run — no second preflight later.
     const agents = await this.preflightForMode(initialMode);
 
-    const run = await this.createRun(request, initialMode, autoRouted);
+    const run = await this.createRun(request, initialMode, autoRouted, {
+      source: options?.source ?? "plan",
+    });
 
     try {
       return { run: await this.runPlanningPhase(run, agents), agents };
@@ -1311,7 +1340,7 @@ export class WorkflowEngine {
   }
 
   async startPlan(request: string, options?: { mode?: WorkflowMode }): Promise<WorkflowRun> {
-    const { run } = await this.planPhase(request, { mode: options?.mode, autoRoute: false });
+    const { run } = await this.planPhase(request, { mode: options?.mode, autoRoute: false, source: "plan" });
     return run;
   }
 
@@ -1395,7 +1424,7 @@ export class WorkflowEngine {
     // no second preflight is needed here. A preflight failure throws before
     // any run or lock exists (post-remediation review M1 is covered by the
     // resume path below).
-    const planned = await this.planPhase(request, { mode: options?.mode, autoRoute: true });
+    const planned = await this.planPhase(request, { mode: options?.mode, autoRoute: true, source: "auto" });
     let run = planned.run;
     const agents = planned.agents;
 
@@ -1433,6 +1462,17 @@ export class WorkflowEngine {
     if (!specContent.trim()) {
       throw new WorkflowError("invalid_transition", `Spec file "${specPath}" is empty`);
     }
+    // The spec is embedded verbatim in every node prompt (worker, each fresh
+    // reviewer, fixer); an oversized document would multiply token cost per
+    // node. Fail fast with guidance instead of burning the budget.
+    const SPEC_MAX_CHARS = 100_000;
+    if (specContent.length > SPEC_MAX_CHARS) {
+      throw new WorkflowError(
+        "invalid_transition",
+        `Spec file "${specPath}" is too large (${specContent.length} characters > ${SPEC_MAX_CHARS}). ` +
+          `Split it into smaller spec documents and run one /work spec per document.`
+      );
+    }
 
     const mode = options?.mode ?? this.config.defaultMode;
     // The spec flow runs only the worker and reviewer nodes; planner/scout
@@ -1449,7 +1489,7 @@ export class WorkflowEngine {
       "--- SPECIFICATION END ---",
     ].join("\n");
 
-    let run = await this.createRun(request, mode, false);
+    let run = await this.createRun(request, mode, false, { source: "spec", specPath: relativeSpecPath });
 
     try {
       run.plan = synthesizeSpecPlan(relativeSpecPath);
@@ -1492,6 +1532,30 @@ export class WorkflowEngine {
       }
     }
     return run;
+  }
+
+  /**
+   * Restore a spec-driven run's plan deterministically (resume path): from
+   * the in-memory state, else the persisted plan.json artifact, else
+   * re-synthesized from the recorded specPath. Transitions to plan_ready.
+   */
+  private async restoreSpecPlan(run: WorkflowRun): Promise<WorkflowRun> {
+    if (!run.plan) {
+      const plan = (await this.loadPlanArtifact(run.id)) ?? (run.specPath ? synthesizeSpecPlan(run.specPath) : undefined);
+      if (!plan) {
+        throw new WorkflowError(
+          "state_corrupt",
+          `Spec-driven run ${run.id} has no plan and no specPath to re-synthesize from; the persisted state is incomplete.`
+        );
+      }
+      run.plan = plan;
+      run.complexity = plan.complexity;
+      await saveArtifact(this.baseDir, run.id, "plan.json", plan);
+    }
+    return await this.stateMachine.transition(run, "plan_ready", {
+      node: "spec",
+      reason: "Restored deterministic spec plan on resume (no planner agent)",
+    });
   }
 
   async resume(runId?: string): Promise<WorkflowRun> {
@@ -1541,6 +1605,16 @@ export class WorkflowEngine {
         case "created":
         case "scouting":
         case "planning":
+          if (run.source === "spec") {
+            // A spec-driven run never plans with an agent: restore the
+            // deterministic plan (state → persisted artifact → re-synthesize
+            // from specPath), then finish the single-command automated flow
+            // to completion, exactly as /work spec would have.
+            run = await this.restoreSpecPlan(run);
+            run = await this.finalizeAutoRouting(run, agents);
+            run = await this.runExecutionLoop(run, agents);
+            break;
+          }
           // Audit Finding 8: re-hydrate the persisted scout artifact instead
           // of re-running (or silently skipping) the scout node.
           run = await this.runPlanningPhase(run, agents);

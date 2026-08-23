@@ -124,10 +124,12 @@ For the common case where the requirement is already written down (for example `
 spec document ──(deterministic plan synthesis, no LLM)──► implement → test gate → fresh review ↔ fix loop → completed
 ```
 
-- The spec file is read from disk (relative to the project root or absolute) and embedded verbatim in the run request, so the worker, every fresh reviewer, and the fixer all see the same authoritative requirement.
+- The spec file is read from disk (relative to the project root or absolute; missing/empty → usage error, >100k characters → split guidance, since the spec is embedded in every node prompt) and embedded verbatim in the run request, so the worker, every fresh reviewer, and the fixer all see the same authoritative requirement.
 - The `PlanResult` is synthesized deterministically by the engine (`synthesizeSpecPlan`); it passes the plan gate by construction and is persisted as `plan.json` like any other run.
 - Preflight requires only the `worker` and `reviewer` agents — scout/planner need not be configured.
-- Review budgets, fresh-reviewer isolation, the fix loop, persistence, and resume behave exactly like `/work auto` (state machine entry: `created → plan_ready`).
+- Review budgets, fresh-reviewer isolation, the fix loop, persistence, and resume behave exactly like `/work auto` (state machine entry: `created → plan_ready`). A spec run records `source: "spec"` + `specPath`; on resume the deterministic plan is restored (state → persisted artifact → re-synthesized from `specPath`) and the automated flow runs to completion — a spec run never falls back to the planner/scout agents.
+- `/work spec <TAB>` completes paths of `spec.md` / `*.spec.md` documents found in the project (`.scratch/<feature>/spec.md` convention).
+- The run source is visible in `/work status` (`Source: spec (path)`), the live widget header (`spec (mode)`), and the completed summary (`Spec: path`); the completed summary renders the worker's verification commands one per line instead of a bare pass count.
 
 ---
 

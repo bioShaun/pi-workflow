@@ -83,4 +83,22 @@ describe("Pure Widget Renderer (Ticket 01)", () => {
       assert.ok(line.length <= 40, `Line exceeds width 40: "${line}" (${line.length})`);
     }
   });
+
+  it("labels the header with the workflow entry point (spec vs auto)", () => {
+    const base: WidgetState = {
+      runId: "wf_20260822_230000_c3d4",
+      mode: "quick",
+      node: "implement",
+      agent: "worker",
+      action: "Executing implementation changes...",
+      tokens: 1000,
+      expanded: false,
+    };
+
+    const specLines = renderLiveWidget({ ...base, label: "spec" }, 100);
+    assert.match(specLines[0], /\[pi-workflow\] spec \(quick\)/);
+
+    const defaultLines = renderLiveWidget(base, 100);
+    assert.match(defaultLines[0], /\[pi-workflow\] auto \(quick\)/);
+  });
 });

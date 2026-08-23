@@ -85,6 +85,16 @@ export interface WorkflowRun {
 
   /** True once the mode has been finalized (creation for explicit, post-plan for auto). */
   modeResolved?: boolean;
+
+  /**
+   * Entry point that created the run. "spec" runs carry the spec document
+   * in `request` and must never run the planner/scout nodes (including on
+   * resume — the plan is re-synthesized deterministically instead).
+   */
+  source?: "auto" | "plan" | "spec";
+
+  /** Spec document path (relative to cwd); present only for source === "spec". */
+  specPath?: string;
 }
 
 export interface WorkflowConfig {

@@ -1,5 +1,27 @@
 import type { WorkflowRun } from "../contracts/workflow.ts";
 import type { PlanResult } from "../contracts/plan.ts";
+import type { TestResult } from "../contracts/implementation.ts";
+
+function verificationIcon(status: TestResult["status"]): string {
+  return status === "passed" ? "✓" : status === "failed" ? "✗" : "–";
+}
+
+/**
+ * Render worker-reported verification entries (commands like `npm test` /
+ * `tsc --noEmit`, NOT individual test cases) one per line. The smoke-test
+ * review showed a bare "N passed" count invites misreading N as a test-case
+ * count — the per-entry summaries make what was actually run legible.
+ */
+export function renderVerificationList(tests: TestResult[], maxEntries = 5): string[] {
+  if (tests.length === 0) return ["– none reported"];
+  const lines = tests.slice(0, maxEntries).map(
+    (t) => `${verificationIcon(t.status)} ${t.command ? `\`${t.command}\` — ` : ""}${t.summary}`
+  );
+  if (tests.length > maxEntries) {
+    lines.push(`… +${tests.length - maxEntries} more (see /work status)`);
+  }
+  return lines;
+}
 
 export function renderHelp(): string {
   return [
@@ -63,6 +85,7 @@ export function renderStatus(run: WorkflowRun | null): string {
     "",
     `Run: ${run.id}`,
     `Mode: ${run.mode}`,
+    ...(run.source ? [`Source: ${run.source}${run.specPath ? ` (${run.specPath})` : ""}`] : []),
     `State: ${run.state}`,
     ...(run.currentNode ? [`Current node: ${run.currentNode}`] : []),
     `Started: ${run.createdAt}`,
@@ -82,7 +105,7 @@ export function renderStatus(run: WorkflowRun | null): string {
     const passedTests = run.implementation.tests.filter((t) => t.status === "passed").length;
     const totalTests = run.implementation.tests.length;
     lines.push(`Implementation PASS (${run.implementation.changedFiles.length} file(s) changed)`);
-    lines.push(`Tests          ${passedTests}/${totalTests} passed`);
+    lines.push(`Verification    ${passedTests}/${totalTests} passed`);
   } else {
     lines.push("Implementation PENDING");
   }
@@ -126,20 +149,26 @@ export function renderCompleted(run: WorkflowRun): string {
 
   const passedTests = latestTests.filter((t) => t.status === "passed").length;
 
-  return [
+  const lines = [
     `pi-workflow · completed`,
     "",
     "Changed Files:",
     ...changedFiles.map((f) => `- ${f.path}`),
     "",
-    "Tests:",
-    `✓ ${passedTests} passed`,
+    // These are the worker's reported verification commands/results, not
+    // individual test cases (see renderVerificationList).
+    `Verification (${passedTests}/${latestTests.length} passed):`,
+    ...renderVerificationList(latestTests),
     "",
     "Review:",
     `✓ PASS after ${run.reviewRound} round(s)`,
     "",
     `Run: ${run.id}`,
-  ].join("\n");
+  ];
+  if (run.source === "spec" && run.specPath) {
+    lines.push(`Spec: ${run.specPath}`);
+  }
+  return lines.join("\n");
 }
 
 export function renderAborted(run: WorkflowRun): string {

@@ -13,7 +13,7 @@
 > repository layout, test inventory, and live output UX. §52 (audit findings and
 > remediation) is the historical record and is preserved as-is. The dated §46 acceptance
 > record (69/69 tests, 2026-08-21) remains a point-in-time record; the current suite is
-> 130 tests (`npm test`).
+> 148 tests (`npm test`).
 
 ---
 
@@ -569,6 +569,12 @@ interface WorkflowRun {
 
   /** True once the mode has been finalized (creation for explicit, post-plan for auto). */
   modeResolved?: boolean;
+
+  /** Entry point that created the run; "spec" runs never run planner/scout (incl. resume). */
+  source?: "auto" | "plan" | "spec";
+
+  /** Spec document path (relative to cwd); present only for source === "spec". */
+  specPath?: string;
 }
 ```
 
@@ -1304,10 +1310,11 @@ requirement is already written down, so no scout or planner agent runs at all.
 Behavior:
 
 ```text
-read the spec file (relative to cwd or absolute; missing/empty → usage error, no run created)
+read the spec file (relative to cwd or absolute; missing/empty → usage error, no run created;
+    > 100k characters → fail with split guidance — the spec is embedded in every node prompt)
 preflight worker + reviewer only (scout/planner agents need not be configured)
-create run; request = one-line preamble + the spec content verbatim between
-    --- SPECIFICATION BEGIN --- / --- SPECIFICATION END --- markers
+create run (source = "spec", specPath recorded); request = one-line preamble + the spec
+    content verbatim between --- SPECIFICATION BEGIN --- / --- SPECIFICATION END --- markers
 synthesize PlanResult deterministically (synthesizeSpecPlan; no LLM call)
 persist plan.json + request.md; emit spec.loaded
 state = plan_ready via the created → plan_ready transition
@@ -1317,7 +1324,24 @@ run the shared /work auto tail: implement → test gate → fresh review ↔ fix
 The spec embedded in the run request is the authoritative plan: the worker,
 every fresh reviewer, and the fixer each receive it through the
 "Original Requirement" prompt section. Review budgets, reviewer freshness,
-fix-loop bounds, persistence, and resume semantics are identical to `/work auto`.
+fix-loop bounds, and persistence are identical to `/work auto`.
+
+Resume: a spec run (`source === "spec"`) interrupted in `created`/`planning`
+never falls back to the planner/scout agents — `restoreSpecPlan` rebuilds the
+deterministic plan (in-memory state → persisted `plan.json` artifact →
+re-synthesized from `specPath`; none available → safe `state_corrupt` failure)
+and then runs the automated flow to completion. A run without `specPath` and
+without a plan fails safely instead of guessing.
+
+Argument completion: after the `spec ` subcommand, the command layer
+completes paths of `spec.md` / `*.spec.md` documents found under the project
+root (`findSpecFileCompletions`, sync scan with dir-denylist and budget).
+
+Surfacing: the run source is shown by `/work status` (`Source: spec (path)`),
+the live widget header (`spec (<mode>)`), and the completed summary
+(`Spec: <path>`); the completed summary renders the worker's verification
+commands one per line (`renderVerificationList`) instead of a bare pass count,
+because those entries are verification commands, not individual test cases.
 
 ---
 
@@ -2198,7 +2222,8 @@ the milestone summary (full design in `docs/spec-workflow-output-widget.md`):
    └─ 按 Ctrl+O 展开实时工具输出
    ```
 
-   The header label is fixed `auto (<mode>)`; the toggle hint is currently Chinese-only.
+   The header label names the entry point — `auto (<mode>)` by default,
+   `spec (<mode>)` for spec-driven runs; the toggle hint is currently Chinese-only.
 3. **Milestone trace lines** (`notify`): each finished node settles into a permanent
    `✓ [agent] action · 3.2s · 65.2k tok` line, with `⚠️`/`✗` variants and `↳`-indented
    detail sublines (review findings on REQUEST_CHANGES, failed fix tests).

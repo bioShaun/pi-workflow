@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import * as fsSync from "node:fs";
+import * as nodePath from "node:path";
 import { parseWorkArgs } from "./parser.ts";
 import {
   renderHelp,
@@ -20,6 +22,57 @@ import { WorkflowLiveWidget, WIDGET_KEY } from "./widget.ts";
 export type NotifyFn = (msg: string, type: "info" | "warning" | "error") => void;
 
 /**
+ * Directories never scanned when completing /work spec file paths. Note that
+ * dot-directories in general ARE scanned: this repo's convention keeps specs
+ * under `.scratch/<feature>/spec.md`.
+ */
+const SPEC_COMPLETION_SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".pi",
+  "dist",
+  "build",
+  "coverage",
+  ".cache",
+]);
+
+const SPEC_COMPLETION_SCAN_BUDGET = 2_000; // visited-dir budget keeps completion snappy
+
+/**
+ * Sync scan for spec documents to offer as /work spec path completions:
+ * files named `spec.md` or ending in `.spec.md` (the repo's convention).
+ * Returns relative paths matching `partial`, sorted, capped.
+ */
+export function findSpecFileCompletions(cwd: string, partial: string, maxItems = 10): string[] {
+  const found: string[] = [];
+  let visited = 0;
+
+  const walk = (dir: string, depth: number): void => {
+    if (visited++ > SPEC_COMPLETION_SCAN_BUDGET || depth > 4 || found.length >= 50) return;
+    let entries: fsSync.Dirent[];
+    try {
+      entries = fsSync.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (found.length >= 50) return;
+      const full = nodePath.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SPEC_COMPLETION_SKIP_DIRS.has(entry.name)) {
+          walk(full, depth + 1);
+        }
+      } else if (entry.name === "spec.md" || entry.name.endsWith(".spec.md")) {
+        found.push(nodePath.relative(cwd, full));
+      }
+    }
+  };
+
+  walk(cwd, 0);
+  return found.filter((p) => p.startsWith(partial)).sort().slice(0, maxItems);
+}
+
+/**
  * Maps workflow progress events onto the command-layer UI: live aboveEditor widget,
  * fallback breadcrumbs via setWorking, and compact trace lines via notify.
  */
@@ -33,6 +86,7 @@ export function createProgressNotifier(
         widgetHolder.widget = new WorkflowLiveWidget({
           runId: event.run.id,
           mode: event.run.mode,
+          label: event.run.source === "spec" ? "spec" : "auto",
           node: event.nodeId,
           agent: event.agent ?? event.nodeId,
           action: event.action ?? "Working...",
@@ -132,6 +186,16 @@ export function registerWorkCommand(pi: ExtensionAPI): void {
     description:
       "Deterministic workflow orchestrator: /work [auto|plan|spec|implement|review|fix|status|resume|abort|list|help]",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
+      const trimmed = (prefix ?? "").trimStart();
+      // /work spec <TAB> completes spec document paths (repo convention:
+      // spec.md / *.spec.md). The extension host does not expose cwd in this
+      // callback, so scan process.cwd() (the project root in the Pi runtime).
+      if (trimmed.toLowerCase().startsWith("spec ") && trimmed.length > "spec".length) {
+        const partial = trimmed.slice("spec ".length).trimStart();
+        const files = findSpecFileCompletions(process.cwd(), partial);
+        if (files.length === 0) return null;
+        return files.map((f) => ({ value: `spec ${f}`, label: f }));
+      }
       const sub = (prefix ?? "").split(" ")[0].toLowerCase();
       const candidates = [
         "auto ",
