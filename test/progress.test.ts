@@ -290,6 +290,10 @@ describe("WorkflowEngine progress lifecycle", () => {
         currentTool: "read",
         currentToolArgs: "package.json",
         recentOutput: "stream line",
+        recentOutputLines: ["stream line"],
+        recentTools: [{ tool: "read", args: "package.json" }],
+        model: "test-model",
+        toolCount: 1,
         durationMs: 500,
         tokens: 1200,
       });
@@ -322,9 +326,14 @@ describe("WorkflowEngine progress lifecycle", () => {
     assert.match(start.action ?? "", /Formulating implementation plan/);
     assert.equal(start.run.id, run.id);
 
-    assert.equal(update.details?.currentTool, "read");
-    assert.equal(update.details?.currentToolArgs, "package.json");
-    assert.equal(update.details?.recentOutput, "stream line");
+    const updateDetails = update.details as any;
+    assert.equal(updateDetails?.currentTool, "read");
+    assert.equal(updateDetails?.currentToolArgs, "package.json");
+    assert.equal(updateDetails?.recentOutput, "stream line");
+    assert.deepEqual(updateDetails?.recentOutputLines, ["stream line"]);
+    assert.deepEqual(updateDetails?.recentTools, [{ tool: "read", args: "package.json" }]);
+    assert.equal(updateDetails?.model, "test-model");
+    assert.equal(updateDetails?.toolCount, 1);
     assert.equal(update.durationMs, 500);
     assert.equal(update.tokens, 1200);
 
@@ -397,29 +406,33 @@ describe("WorkflowEngine progress lifecycle", () => {
     }
 
     const implementEnd = ends.find((e) => e.nodeId === "implement")!;
+    const implementDetails = implementEnd.details as any;
     assert.equal(implementEnd.agent, "worker");
-    assert.deepEqual(implementEnd.details?.changedFiles, ["src/main.ts"]);
-    assert.equal(implementEnd.details?.passedTests, 1);
-    assert.equal(implementEnd.details?.totalTests, 1);
+    assert.deepEqual(implementDetails?.changedFiles, ["src/main.ts"]);
+    assert.equal(implementDetails?.passedTests, 1);
+    assert.equal(implementDetails?.totalTests, 1);
 
     const review1End = ends.find((e) => e.nodeId === "review-1")!;
-    assert.equal(review1End.details?.verdict, "REQUEST_CHANGES");
-    assert.equal(review1End.details?.findings, 1);
+    const review1Details = review1End.details as any;
+    assert.equal(review1Details?.verdict, "REQUEST_CHANGES");
+    assert.equal(review1Details?.findings, 1);
     assert.match(review1End.action ?? "", /REQUEST_CHANGES/);
-    const findingList = review1End.details?.findingList as Array<Record<string, unknown>>;
+    const findingList = review1Details?.findingList as Array<Record<string, unknown>>;
     assert.equal(findingList.length, 1);
     assert.equal(findingList[0].description, "Missing null guard on input");
     assert.equal(findingList[0].file, "src/main.ts");
 
     const review2End = ends.find((e) => e.nodeId === "review-2")!;
-    assert.equal(review2End.details?.verdict, "PASS");
-    assert.equal(review2End.details?.findings, 0);
+    const review2Details = review2End.details as any;
+    assert.equal(review2Details?.verdict, "PASS");
+    assert.equal(review2Details?.findings, 0);
     assert.match(review2End.action ?? "", /Verdict: PASS/);
 
     const fixEnd = ends.find((e) => e.nodeId === "fix-1")!;
+    const fixDetails = fixEnd.details as any;
     assert.equal(fixEnd.agent, "worker");
-    assert.deepEqual(fixEnd.details?.changedFiles, ["src/main.ts"]);
-    assert.ok((fixEnd.details?.addressedFindings as string[]).includes("finding-1"));
+    assert.deepEqual(fixDetails?.changedFiles, ["src/main.ts"]);
+    assert.ok((fixDetails?.addressedFindings as string[]).includes("finding-1"));
 
     // Live updates must be forwarded for every started node, with the tool
     // metadata the wrapper emitted — not only the plan node.
@@ -429,9 +442,10 @@ describe("WorkflowEngine progress lifecycle", () => {
       ["scout", "plan", "implement", "review-1", "fix-1", "review-2"]
     );
     for (const update of updates) {
-      assert.equal(update.details?.currentTool, "read");
-      assert.equal(update.details?.currentToolArgs, "package.json");
-      assert.equal(update.details?.recentOutput, "stream line");
+      const uDetails = update.details as any;
+      assert.equal(uDetails?.currentTool, "read");
+      assert.equal(uDetails?.currentToolArgs, "package.json");
+      assert.equal(uDetails?.recentOutput, "stream line");
       assert.equal(update.durationMs, 500);
       assert.equal(update.tokens, 1200);
     }
@@ -494,10 +508,11 @@ describe("WorkflowEngine progress lifecycle", () => {
     assert.equal(run.error?.code, "required_tests_failed");
 
     const fixEnd = events.find((e) => e.type === "node_end" && e.nodeId === "fix-1")!;
+    const fixDetails = fixEnd.details as any;
     assert.match(fixEnd.action ?? "", /1\/2 tests passed/);
-    assert.equal(fixEnd.details?.passedTests, 1);
-    assert.equal(fixEnd.details?.failedTests, 1);
-    assert.equal(fixEnd.details?.totalTests, 2);
+    assert.equal(fixDetails?.passedTests, 1);
+    assert.equal(fixDetails?.failedTests, 1);
+    assert.equal(fixDetails?.totalTests, 2);
   });
 
   it("emits exactly one terminal event across a retry and covers the full node duration", async () => {

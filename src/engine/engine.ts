@@ -249,6 +249,16 @@ export function synthesizeSpecPlan(specPath: string, policy?: SpecPolicy): PlanR
   };
 }
 
+export interface WorkflowNodeUpdateDetails {
+  currentTool?: string;
+  currentToolArgs?: string;
+  recentOutput?: string;
+  recentOutputLines?: string[];
+  recentTools?: Array<{ tool: string; args: string }>;
+  model?: string;
+  toolCount?: number;
+}
+
 export interface WorkflowProgressEvent {
   type: "node_start" | "node_update" | "node_end";
   run: WorkflowRun;
@@ -257,7 +267,7 @@ export interface WorkflowProgressEvent {
   action?: string;
   durationMs?: number;
   tokens?: number;
-  details?: Record<string, unknown>;
+  details?: (WorkflowNodeUpdateDetails & Record<string, unknown>) | Record<string, unknown>;
 }
 
 export type WorkflowProgressCallback = (event: WorkflowProgressEvent) => void;
@@ -1532,6 +1542,10 @@ export class WorkflowEngine {
         currentTool: update.currentTool,
         currentToolArgs: update.currentToolArgs,
         recentOutput: update.recentOutput,
+        recentOutputLines: update.recentOutputLines,
+        recentTools: update.recentTools,
+        model: update.model,
+        toolCount: update.toolCount,
       },
     });
   }

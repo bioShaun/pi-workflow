@@ -18,6 +18,12 @@ import type { WorkflowProgressEvent } from "../engine/engine.ts";
 import { PiSubagentsExecutor } from "../agents/pi-subagents-executor.ts";
 import { createWorkflowUI, type WorkflowUI } from "./ui-port.ts";
 import { WorkflowLiveWidget, WIDGET_KEY } from "./widget.ts";
+import {
+  formatStageLabel,
+  updateActivityTape,
+  deriveWorkflowRoute,
+  normalizeOutputLines,
+} from "./activity-normalizer.ts";
 
 export type NotifyFn = (msg: string, type: "info" | "warning" | "error") => void;
 
@@ -82,39 +88,78 @@ export function createProgressNotifier(
 ): (event: WorkflowProgressEvent) => void {
   return (event: WorkflowProgressEvent) => {
     if (event.type === "node_start") {
+      const stageLabel = formatStageLabel(event.nodeId);
+      const route = deriveWorkflowRoute(event.run.source, event.run.mode, event.nodeId, event.run.reviewRound);
       if (!widgetHolder.widget) {
         widgetHolder.widget = new WorkflowLiveWidget({
           runId: event.run.id,
+          source: event.run.source ?? (event.run.source === "spec" ? "spec" : "auto"),
           mode: event.run.mode,
           label: event.run.source === "spec" ? "spec" : "auto",
+          nodeId: event.nodeId,
           node: event.nodeId,
+          stageLabel,
           agent: event.agent ?? event.nodeId,
           action: event.action ?? "Working...",
+          nodeTokens: event.tokens ?? 0,
           tokens: event.tokens ?? 0,
+          toolCount: 0,
+          activities: [],
+          route,
           expanded: false,
+          lastProgressAt: Date.now(),
         });
         widgetHolder.widget.attach(ui);
       } else {
         widgetHolder.widget.update({
+          nodeId: event.nodeId,
           node: event.nodeId,
+          stageLabel,
           agent: event.agent ?? event.nodeId,
           action: event.action ?? "Working...",
+          nodeTokens: event.tokens ?? 0,
           tokens: event.tokens ?? 0,
+          toolCount: 0,
+          activities: [],
+          route,
+          lastProgressAt: Date.now(),
         });
       }
       ui.setWorking(formatWorkingBreadcrumb(event.agent ?? event.nodeId, event.action ?? "Working..."));
     } else if (event.type === "node_update") {
-      const toolName = event.details?.currentTool as string | undefined;
-      const toolArgs = event.details?.currentToolArgs as string | undefined;
-      const recentOut = event.details?.recentOutput as string | undefined;
+      const details = event.details as any;
+      const toolName = details?.currentTool as string | undefined;
+      const toolArgs = details?.currentToolArgs as string | undefined;
+      const recentOut = details?.recentOutput as string | undefined;
+      const recentOutLines = details?.recentOutputLines as string[] | undefined;
+      const recentTools = details?.recentTools as Array<{ tool: string; args: string }> | undefined;
+      const toolCount = details?.toolCount as number | undefined;
 
       if (widgetHolder.widget) {
+        const outLines = normalizeOutputLines(recentOutLines, recentOut);
+        const currentToolCall = toolName ? { tool: toolName, args: toolArgs } : undefined;
+        const activities = updateActivityTape(
+          widgetHolder.widget.state.activities ?? [],
+          currentToolCall,
+          recentTools,
+          outLines
+        );
+
+        const route = deriveWorkflowRoute(event.run.source, event.run.mode, event.nodeId, event.run.reviewRound);
+
         widgetHolder.widget.update({
+          nodeId: event.nodeId,
           node: event.nodeId,
+          stageLabel: formatStageLabel(event.nodeId),
           agent: event.agent ?? event.nodeId,
           action: event.action ?? "Working...",
           durationMs: event.durationMs,
+          nodeTokens: event.tokens ?? widgetHolder.widget.state.nodeTokens ?? widgetHolder.widget.state.tokens,
           tokens: event.tokens ?? widgetHolder.widget.state.tokens,
+          toolCount: toolCount ?? widgetHolder.widget.state.toolCount,
+          activities,
+          route,
+          lastProgressAt: Date.now(),
           tool: toolName ? { name: toolName, args: toolArgs } : undefined,
           stdout: recentOut,
         });
@@ -132,12 +177,13 @@ export function createProgressNotifier(
     } else if (event.type === "node_end") {
       let traceDetails: string[] | undefined;
       let traceStatus: "success" | "warning" | "error" = "success";
+      const details = event.details as Record<string, unknown> | undefined;
 
       if (event.nodeId.startsWith("review")) {
-        const verdict = event.details?.verdict as string | undefined;
+        const verdict = details?.verdict as string | undefined;
         if (verdict === "REQUEST_CHANGES") {
           traceStatus = "warning";
-          const findingList = event.details?.findingList as Array<{ severity: string; description: string; file?: string }> | undefined;
+          const findingList = details?.findingList as Array<{ severity: string; description: string; file?: string }> | undefined;
           if (findingList && findingList.length > 0) {
             traceDetails = findingList.map(
               (f) => `[${f.severity.toUpperCase()}] ${f.description}${f.file ? ` (${f.file})` : ""}`
@@ -145,9 +191,9 @@ export function createProgressNotifier(
           }
         }
       } else if (event.nodeId.startsWith("fix")) {
-        const totalTests = (event.details?.totalTests as number | undefined) ?? 0;
-        const passedTests = (event.details?.passedTests as number | undefined) ?? 0;
-        const failedTests = (event.details?.failedTests as number | undefined) ?? 0;
+        const totalTests = (details?.totalTests as number | undefined) ?? 0;
+        const passedTests = (details?.passedTests as number | undefined) ?? 0;
+        const failedTests = (details?.failedTests as number | undefined) ?? 0;
         if (failedTests > 0) {
           traceStatus = "error";
           traceDetails = [`Fix worker reported ${failedTests} failed test(s) (${passedTests}/${totalTests} passed)`];

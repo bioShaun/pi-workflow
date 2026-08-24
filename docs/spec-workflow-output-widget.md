@@ -273,12 +273,5 @@ Deviations from this spec (accepted, documented for accuracy):
    `按 Ctrl+O 展开实时工具输出` (collapsed) / `按 Ctrl+O 折叠详情` (expanded); no i18n.
 3. **Trace detail marker** — milestone trace detail sublines use `  ↳ ` indentation (not
    `⎿`); `⎿` appears only on the widget's tool/stdout rows.
-4. **Expanded block** — the verbose block shows `context: fresh · runId: <id>` and, while a
-   tool is in flight, `status: in-flight I/O · mode: <mode>`; it is a compact context
-   block, not a full streaming tool-output pane (the one-line `stdout` preview is still
-   the only live output surface).
-5. **RPC/print degradation** — matches the spec's intent with one mechanical note: RPC mode
-   mounts a single static `string[]` snapshot from `renderRPC()` at `attach()` (there is no
-   TUI to re-render, so later updates change state only); print/JSON mode (`ctx.hasUI ===
-   false`) makes no external UI calls and mounts no visible widget (the notifier
-   still instantiates an internal no-op widget and its 500 ms timer per run).
+4. **Expanded block (Activity Tape)** — the verbose block is upgraded to an Activity Tape: rolling history of recent tool activities (Read, Search, Edit, Run), latest output evidence (up to 2 lines), telemetry freshness (age of last update, warning on staleness), cumulative tool calls, next workflow route, and optional diagnostics when stale/failed. Full logs remain in underlying subagent/session artifacts.
+5. **RPC/print degradation** — RPC mode mounts and updates via the UI port; print/JSON mode (`ctx.hasUI === false`) makes no external UI calls and mounts no visible widget.

@@ -1,6 +1,7 @@
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { renderLiveWidget, type WidgetState, type ThemeHelper } from "./widget-renderer.ts";
+import { updateActivityTape } from "./activity-normalizer.ts";
 import type { WorkflowUI } from "./ui-port.ts";
 
 export const WIDGET_KEY = "pi-workflow-live";
@@ -21,6 +22,7 @@ export function isCtrlO(data: string): boolean {
 
 export class WorkflowLiveWidget {
   public state: WidgetState;
+  private ui?: WorkflowUI;
   private tui?: TUI;
   private tickerTimer?: ReturnType<typeof setInterval>;
   private unsubscribeInput?: () => void;
@@ -28,30 +30,91 @@ export class WorkflowLiveWidget {
   private isDisposed: boolean = false;
 
   constructor(initialState: WidgetState) {
+    const now = initialState.now ?? Date.now();
     this.state = {
       ...initialState,
       spinnerFrame: initialState.spinnerFrame ?? 0,
       expanded: initialState.expanded ?? false,
+      now,
+      lastProgressAt: initialState.lastProgressAt ?? now,
+      nodeTokens: initialState.nodeTokens ?? initialState.tokens ?? 0,
+      toolCount: initialState.toolCount ?? 0,
+      activities: initialState.activities ?? [],
+      route: initialState.route ?? [],
     };
   }
 
   public update(patch: Partial<WidgetState>): void {
     if (this.isDisposed) return;
-    this.state = { ...this.state, ...patch };
+
+    const prevNode = this.state.nodeId || this.state.node || "worker";
+    const nextNode = patch.nodeId || patch.node || prevNode;
+
+    const effectiveTokens = patch.nodeTokens ?? patch.tokens ?? (nextNode !== prevNode ? 0 : this.state.nodeTokens);
+
+    let activities = patch.activities;
+    if (!activities && patch.tool) {
+      const outLines = patch.stdout ? [patch.stdout] : undefined;
+      activities = updateActivityTape(
+        nextNode !== prevNode ? [] : (this.state.activities ?? []),
+        patch.tool,
+        undefined,
+        outLines
+      );
+    }
+
+    // Node transition resets previous node's activities and stale state
+    if (nextNode !== prevNode) {
+      this.state = {
+        ...this.state,
+        ...patch,
+        nodeId: nextNode,
+        node: nextNode,
+        nodeTokens: effectiveTokens,
+        tokens: effectiveTokens,
+        activities: activities ?? [],
+        toolCount: patch.toolCount ?? 0,
+        lastProgressAt: patch.lastProgressAt ?? Date.now(),
+        now: Date.now(),
+      };
+    } else {
+      this.state = {
+        ...this.state,
+        ...patch,
+        nodeTokens: effectiveTokens,
+        tokens: effectiveTokens,
+        ...(activities ? { activities } : {}),
+        now: patch.now ?? this.state.now ?? Date.now(),
+      };
+    }
+
     this.requestRenderIfChanged();
   }
 
   public getRenderKey(): string {
+    const now = this.state.now ?? Date.now();
+    const lastProg = this.state.lastProgressAt;
+    const freshnessAgeSec = lastProg != null ? Math.floor((now - lastProg) / 1000) : undefined;
+    const durSec = Math.floor((this.state.durationMs ?? 0) / 1000);
+
     return JSON.stringify({
-      node: this.state.node,
+      nodeId: this.state.nodeId || this.state.node,
       agent: this.state.agent,
       action: this.state.action,
-      tool: this.state.tool,
-      stdout: this.state.stdout,
-      tokens: this.state.tokens,
+      activities: (this.state.activities ?? []).map((a) => ({
+        k: a.kind,
+        l: a.label,
+        d: a.detail,
+        s: a.status,
+        o: a.output,
+      })),
+      route: (this.state.route ?? []).map((r) => `${r.label}:${r.status}`),
+      tokens: this.state.nodeTokens ?? this.state.tokens,
+      toolCount: this.state.toolCount,
       expanded: this.state.expanded,
       frame: this.state.spinnerFrame,
-      dur: Math.floor((this.state.durationMs ?? 0) / 1000),
+      dur: durSec,
+      freshness: freshnessAgeSec,
     });
   }
 
@@ -60,6 +123,13 @@ export class WorkflowLiveWidget {
     if (key !== this.lastRenderKey) {
       this.lastRenderKey = key;
       this.tui?.requestRender();
+      if (this.ui?.isRPC?.() && this.ui.hasUI()) {
+        try {
+          this.ui.setWidget(WIDGET_KEY, this.renderRPC(), { placement: "aboveEditor" });
+        } catch {
+          // Ignore RPC refresh errors
+        }
+      }
     }
   }
 
@@ -100,6 +170,7 @@ export class WorkflowLiveWidget {
 
   public attach(ui: WorkflowUI): void {
     if (this.isDisposed) return;
+    this.ui = ui;
 
     // Register widget with ui port
     if (ui.hasUI()) {
@@ -119,6 +190,7 @@ export class WorkflowLiveWidget {
     if (!this.tickerTimer) {
       this.tickerTimer = setInterval(() => {
         if (this.isDisposed) return;
+        this.state.now = Date.now();
         this.state.spinnerFrame = ((this.state.spinnerFrame ?? 0) + 1) % 10;
         this.requestRenderIfChanged();
       }, 500);
@@ -142,10 +214,12 @@ export class WorkflowLiveWidget {
       this.unsubscribeInput = undefined;
     }
 
-    if (ui && ui.hasUI()) {
-      ui.setWidget(WIDGET_KEY, undefined);
+    const effectiveUI = ui ?? this.ui;
+    if (effectiveUI && effectiveUI.hasUI()) {
+      effectiveUI.setWidget(WIDGET_KEY, undefined);
     }
 
     this.tui = undefined;
+    this.ui = undefined;
   }
 }

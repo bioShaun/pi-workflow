@@ -169,7 +169,10 @@ work:
 工作流命令运行期间，有三个界面汇报进度：
 
 1. **工作面包屑** — 屏幕底部一行 `[agent] action · tool · 8.4s · 142.0k tok`，跟随进行中的节点及其当前工具调用。
-2. **实时 widget（仅 TUI）** — 单个树状 widget 锚定在编辑器上方（`pi-workflow-live`，`aboveEditor` 位置），显示 spinner、运行模式、当前活跃节点/agent/动作、进行中的工具及参数、一行 stdout 预览、token/耗时计数器。`Ctrl+O` 展开/收起详细块（fresh context、run id，以及工具在途时的 `status: in-flight I/O · mode`）。widget 在第一个节点事件时创建，在命令结束（成功、失败或中止）时销毁，因此不会残留过期进度。它按 500 ms 的 spinner 节拍刷新，仅在渲染 key 变化时重新渲染。RPC 模式下同一个纯渲染器在 attach 时安装一次为静态纯文本快照（之后的进度改由面包屑与里程碑界面输出）；print/JSON 模式下不调用任何外部 UI、不挂载可见 widget（notifier 仍会按每个 run 实例化一个 no-op 的内部 widget 和 timer）。
+2. **实时 widget（仅 TUI）** — 单个树状 widget 锚定在编辑器上方（`pi-workflow-live`，`aboveEditor` 位置）：
+   - **折叠心跳态** — 2-3 行，显示 spinner、工作流入口与模式（如 `spec/strict`）、人类可读阶段名、节点耗时、节点作用域 token 计数、活跃角色与当前动作（`Ctrl+O 查看最近活动`）。
+   - **展开活动带（Activity Tape）** — 最近工具调用滚动历史（精简为 Read、Search、Edit、Run）、最新输出证据（最多 2 行）、遥测新鲜度（距上次更新时间，停滞时告警）、累计工具调用次数、后续工作流路线（Route），以及仅在故障/停滞时呈现的简明诊断行（`Ctrl+O 折叠`）。完整日志保留在底层 subagent/session 产物中。
+   widget 按 500 ms 节拍刷新，仅在渲染 key 变化时重绘。RPC 模式下通过 UI port 挂载并同步更新；print/JSON 模式下不挂载可见 widget。
 3. **里程碑 trace 行** — 每个完成的节点输出一条常驻 transcript 行，例如 `✓ [planner] Plan approved (4 steps, low complexity) · 3.2s · 65.2k tok`；要求修改的 review 渲染为 `⚠️`、测试失败的 fix 节点渲染为 `✗`，均带 `↳` 缩进的细节子行。节点执行失败时不输出终端行——run 的失败改为以 workflow error 形式呈现。
 
 引擎通过类型化的 `WorkflowUI` 端口（`src/commands/ui-port.ts`）驱动上述全部界面，事件源为 `WorkflowProgressEvent`（`node_start` / `node_update` / `node_end`）；该端口还会守护所有 UI 调用，防止 `/reload` 或会话替换之后出现过期 extension 上下文错误。

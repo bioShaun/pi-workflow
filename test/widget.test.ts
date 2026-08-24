@@ -3,7 +3,7 @@ import * as assert from "node:assert/strict";
 import { WorkflowLiveWidget, isCtrlO, WIDGET_KEY } from "../src/commands/widget.ts";
 import type { WorkflowUI } from "../src/commands/ui-port.ts";
 
-describe("Live Widget Component & Keybindings (Ticket 03)", () => {
+describe("Live Widget Component & Keybindings", () => {
   it("detects Ctrl+O key character", () => {
     assert.equal(isCtrlO("\x0f"), true);
     assert.equal(isCtrlO("\u000f"), true);
@@ -29,31 +29,77 @@ describe("Live Widget Component & Keybindings (Ticket 03)", () => {
   it("handles state updates and render-key diffing", () => {
     const widget = new WorkflowLiveWidget({
       runId: "wf_test",
+      source: "auto",
       mode: "normal",
-      node: "worker",
+      nodeId: "worker",
       agent: "worker",
       action: "Working...",
-      tokens: 1000,
+      nodeTokens: 1000,
       expanded: false,
     });
 
     const key1 = widget.getRenderKey();
     assert.ok(key1.includes("worker"));
 
-    widget.update({ tokens: 5000, tool: { name: "edit_file", args: "foo.ts" } });
+    widget.update({ nodeTokens: 5000, tool: { name: "edit_file", args: "foo.ts" } });
     const key2 = widget.getRenderKey();
     assert.notEqual(key1, key2);
-    assert.ok(key2.includes("edit_file"));
+    assert.ok(key2.includes("foo.ts"));
+
+    // Duplicate telemetry does not change render key
+    widget.update({ nodeTokens: 5000 });
+    const key3 = widget.getRenderKey();
+    assert.equal(key2, key3);
+  });
+
+  it("resets activities and stale state on node transition", () => {
+    const widget = new WorkflowLiveWidget({
+      runId: "wf_test",
+      source: "auto",
+      mode: "normal",
+      nodeId: "scout",
+      agent: "scout",
+      action: "Exploring...",
+      nodeTokens: 1000,
+      activities: [
+        {
+          key: "read:Read:src/index.ts",
+          kind: "read",
+          label: "Read",
+          detail: "src/index.ts",
+          status: "previous",
+          output: [],
+        },
+      ],
+      toolCount: 5,
+      expanded: false,
+    });
+
+    assert.equal(widget.state.activities?.length, 1);
+    assert.equal(widget.state.toolCount, 5);
+
+    // Transition to plan node
+    widget.update({
+      nodeId: "plan",
+      agent: "planner",
+      action: "Planning...",
+    });
+
+    assert.equal(widget.state.nodeId, "plan");
+    assert.equal(widget.state.activities?.length, 0);
+    assert.equal(widget.state.toolCount, 0);
+    assert.equal(widget.state.nodeTokens, 0);
   });
 
   it("toggles expanded state on Ctrl+O input and consumes key event", () => {
     const widget = new WorkflowLiveWidget({
       runId: "wf_test",
+      source: "auto",
       mode: "normal",
-      node: "worker",
+      nodeId: "worker",
       agent: "worker",
       action: "Working...",
-      tokens: 1000,
+      nodeTokens: 1000,
       expanded: false,
     });
 
@@ -94,11 +140,12 @@ describe("Live Widget Component & Keybindings (Ticket 03)", () => {
 
     const widget = new WorkflowLiveWidget({
       runId: "wf_test",
+      source: "auto",
       mode: "normal",
-      node: "worker",
+      nodeId: "worker",
       agent: "worker",
       action: "Working...",
-      tokens: 1000,
+      nodeTokens: 1000,
       expanded: false,
     });
 
